@@ -1,21 +1,3 @@
-"""
-This module implements a WebSocket-based voice client for the Ultravox service.
-It handles real-time audio streaming, voice state management, and bidirectional
-communication with the Ultravox server.
-
-Key Components:
-- LocalAudioSink: Handles audio output to the default audio device
-- LocalAudioSource: Captures audio input from the default microphone
-- WebsocketVoiceSession: Manages the WebSocket connection and voice session state
-
-Dependencies:
-- sounddevice: For audio I/O
-- websockets: For WebSocket communication
-- aiohttp: For HTTP requests
-- numpy: For audio data processing
-- pyee: For event handling
-"""
-
 import argparse
 import asyncio
 import datetime
@@ -30,6 +12,7 @@ from typing import Any, AsyncGenerator, Awaitable, Literal
 import aiohttp
 import numpy as np
 import pyee.asyncio
+import requests
 import sounddevice
 from websockets import exceptions as ws_exceptions
 from websockets.asyncio import client as ws_client
@@ -44,25 +27,10 @@ class LocalAudioSink:
     """
 
     def __init__(self, sample_rate: int = 48000) -> None:
-        """
-        Initializes the LocalAudioSink instance.
-
-        Args:
-            sample_rate: The sample rate to use for audio playback.
-        """
         self._sample_rate = sample_rate
         self._buffer: bytearray = bytearray()
 
         def callback(outdata: np.ndarray, frame_count, time, status):
-            """
-            Audio callback function.
-
-            Args:
-                outdata: Output audio data
-                frame_count: Number of frames
-                time: Time information
-                status: Status flags
-            """
             output_frame_size = len(outdata) * 2
             next_frame = self._buffer[:output_frame_size]
             self._buffer[:] = self._buffer[output_frame_size:]
@@ -85,24 +53,14 @@ class LocalAudioSink:
             raise RuntimeError("Failed to start streaming output audio")
 
     def write(self, chunk: bytes) -> None:
-        """
-        Writes audio data (expected to be in 16-bit PCM format) to this sink's buffer.
-
-        Args:
-            chunk: Audio data chunk
-        """
+        """Writes audio data (expected to be in 16-bit PCM format) to this sink's buffer."""
         self._buffer.extend(chunk)
 
     def drop_buffer(self) -> None:
-        """
-        Drops all audio data in this sink's buffer, ending playback until new data is written.
-        """
+        """Drops all audio data in this sink's buffer, ending playback until new data is written."""
         self._buffer.clear()
 
     async def close(self) -> None:
-        """
-        Closes the audio stream.
-        """
         if self._stream:
             self._stream.close()
 
@@ -117,34 +75,13 @@ class LocalAudioSource:
     """
 
     def __init__(self, sample_rate=48000):
-        """
-        Initializes the LocalAudioSource instance.
-
-        Args:
-            sample_rate: The sample rate to use for audio recording.
-        """
         self._sample_rate = sample_rate
 
     async def stream(self) -> AsyncGenerator[bytes, None]:
-        """
-        Returns an AsyncGenerator that yields audio data chunks.
-
-        Yields:
-            bytes: Audio data chunk
-        """
         queue: asyncio.Queue[bytes] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def callback(indata: np.ndarray, frame_count, time, status):
-            """
-            Audio callback function.
-
-            Args:
-                indata: Input audio data
-                frame_count: Number of frames
-                time: Time information
-                status: Status flags
-            """
             loop.call_soon_threadsafe(queue.put_nowait, indata.tobytes())
 
         stream = sounddevice.InputStream(
@@ -163,18 +100,9 @@ class LocalAudioSource:
 
 
 class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
-    """
-    A websocket-based voice session that connects to an Ultravox call. The session continuously
-    streams audio in and out and emits events for state changes and agent messages.
-    """
+    """A websocket-based voice session that connects to an Ultravox call."""
 
     def __init__(self, join_url: str):
-        """
-        Initializes the WebsocketVoiceSession instance.
-
-        Args:
-            join_url: The WebSocket URL for joining the call
-        """
         super().__init__()
         self._state: Literal["idle", "listening", "thinking", "speaking"] = "idle"
         self._pending_output = ""
@@ -185,22 +113,25 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
             self._pump_audio(LocalAudioSource())
         )
         self._sink = LocalAudioSink()
+        self._use_flask_callback = bool(os.getenv('FLASK_STATE_CALLBACK'))
+
+    def _update_state(self, new_state: str):
+        if new_state != self._state:
+            self._state = new_state
+            self.emit("state", new_state)
+            if self._use_flask_callback:
+                try:
+                    requests.get(f'http://localhost:5000/update_state/{new_state}')
+                except Exception as e:
+                    logging.warning(f"Failed to update Flask state: {e}")
 
     async def start(self):
-        """
-        Starts the voice session by connecting to the WebSocket URL.
-        """
+        """Start the websocket session."""
         logging.info(f"Connecting to {self._url}")
         self._socket = await ws_client.connect(self._url)
         self._receive_task = asyncio.create_task(self._socket_receive(self._socket))
 
     async def _socket_receive(self, socket: ws_client.ClientConnection):
-        """
-        Receives messages from the WebSocket connection.
-
-        Args:
-            socket: The WebSocket client connection
-        """
         try:
             async for message in socket:
                 await self._on_socket_message(message)
@@ -215,9 +146,7 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
         self.emit("ended")
 
     async def stop(self):
-        """
-        Ends the voice session by closing the WebSocket connection and stopping audio streaming.
-        """
+        """End the session, closing the connection and ending the call."""
         logging.info("Stopping...")
         await _async_close(
             self._sink.close(),
@@ -225,16 +154,9 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
             _async_cancel(self._send_audio_task, self._receive_task),
         )
         if self._state != "idle":
-            self._state = "idle"
-            self.emit("state", "idle")
+            self._update_state("idle")
 
     async def _on_socket_message(self, payload: str | bytes):
-        """
-        Handles incoming messages from the WebSocket connection.
-
-        Args:
-            payload: The message payload
-        """
         if isinstance(payload, bytes):
             self._sink.write(payload)
             return
@@ -243,24 +165,11 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
             await self._handle_data_message(msg)
 
     async def _handle_data_message(self, msg: dict[str, Any]):
-        """
-        Handles incoming data messages from the WebSocket connection.
-
-        Processes different message types:
-        - playback_clear_buffer: Clears the audio buffer
-        - state: Updates the current voice state (idle/listening/thinking/speaking)
-        - transcript: Handles transcribed text from the agent
-
-        Args:
-            msg: Dictionary containing the message data
-        """
         match msg["type"]:
             case "playback_clear_buffer":
                 self._sink.drop_buffer()
             case "state":
-                if msg["state"] != self._state:
-                    self._state = msg["state"]
-                    self.emit("state", msg["state"])
+                self._update_state(msg["state"])
             case "transcript":
                 # Handle only agent transcripts, ignore user transcripts
                 if msg["role"] != "agent":
@@ -273,6 +182,9 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                     self.emit("output", self._pending_output, msg["final"])
                 if msg["final"]:
                     self._pending_output = ""
+            case "voice_synced_transcript":
+                # Just ignore voice synced transcripts
+                pass
             case "client_tool_invocation":
                 await self._handle_client_tool_call(
                     msg["toolName"], msg["invocationId"], msg["parameters"]
@@ -285,14 +197,6 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
     async def _handle_client_tool_call(
         self, tool_name: str, invocation_id: str, parameters: dict[str, Any]
     ):
-        """
-        Handles client tool invocations.
-
-        Args:
-            tool_name: The name of the tool
-            invocation_id: The invocation ID
-            parameters: The tool parameters
-        """
         logging.info(f"client tool call: {tool_name}")
         response: dict[str, str] = {
             "type": "client_tool_result",
@@ -321,12 +225,6 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
         await self._socket.send(json.dumps(response))
 
     async def _pump_audio(self, source: LocalAudioSource):
-        """
-        Pumps audio data from the LocalAudioSource to the WebSocket connection.
-
-        Args:
-            source: The LocalAudioSource instance
-        """
         async for chunk in source.stream():
             if self._socket is None:
                 continue
@@ -334,12 +232,6 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
 
 
 async def _async_close(*awaitables_or_none: Awaitable | None):
-    """
-    Helper function to safely close multiple async resources.
-
-    Args:
-        *awaitables_or_none: Variable number of awaitable objects or None
-    """
     coros = [coro for coro in awaitables_or_none if coro is not None]
     if coros:
         maybe_exceptions = await asyncio.shield(
@@ -361,32 +253,12 @@ async def _async_close(*awaitables_or_none: Awaitable | None):
 
 
 async def _async_cancel(*tasks_or_none: asyncio.Task | None):
-    """
-    Helper function to safely cancel multiple async tasks.
-
-    Args:
-        *tasks_or_none: Variable number of Task objects or None
-    """
     tasks = [task for task in tasks_or_none if task is not None and task.cancel()]
     await _async_close(*tasks)
 
 
 async def _get_join_url() -> str:
-    """
-    Creates a new Ultravox call and returns its join URL.
-
-    The function performs the following steps:
-    1. Reads necessary environment variables
-    2. Makes an HTTP request to create a new call
-    3. Constructs and returns the WebSocket URL for joining the call
-
-    Returns:
-        str: The WebSocket URL for joining the call
-
-    Raises:
-        ValueError: If required environment variables are missing
-        RuntimeError: If the call creation fails
-    """
+    """Creates a new call, returning its join URL."""
     target = "https://api.ultravox.ai/api/calls"
     if args.prior_call_id:
         target += f"?priorCallId={args.prior_call_id}"
@@ -412,8 +284,6 @@ async def _get_join_url() -> str:
                 "serverWebSocket": {
                     "inputSampleRate": 48000,
                     "outputSampleRate": 48000,
-                    # Buffer up to 30s of audio client-side. This won't impact
-                    # interruptions because we handle playback_clear_buffer above.
                     "clientBufferSizeMs": 30000,
                 }
             },
@@ -443,17 +313,6 @@ async def _get_join_url() -> str:
 
 
 def _add_query_param(url: str, key: str, value: str) -> str:
-    """
-    Adds a query parameter to a URL.
-
-    Args:
-        url: The base URL
-        key: Query parameter key
-        value: Query parameter value
-
-    Returns:
-        str: URL with the added query parameter
-    """
     url_parts = list(urllib.parse.urlparse(url))
     query = dict(urllib.parse.parse_qsl(url_parts[4]))
     query.update({key: value})
@@ -462,12 +321,6 @@ def _add_query_param(url: str, key: str, value: str) -> str:
 
 
 async def main():
-    """
-    Main entry point for the WebSocket voice client.
-
-    Sets up logging, creates a voice session, and handles graceful shutdown
-    on keyboard interrupt or system signals.
-    """
     join_url = await _get_join_url()
     client = WebsocketVoiceSession(join_url)
     done = asyncio.Event()
@@ -475,47 +328,24 @@ async def main():
 
     @client.on("state")
     async def on_state(state):
-        """
-        Handles state changes.
-
-        Args:
-            state: The new state
-        """
         if state == "listening":
-            # Used to prompt the user to speak
             print("User:  ", end="\r")
         elif state == "thinking":
             print("Agent: ", end="\r")
 
     @client.on("output")
     async def on_output(text, final):
-        """
-        Handles output from the agent.
-
-        Args:
-            text: The output text
-            final: Whether the output is final
-        """
         display_text = f"{text.strip()}"
         print("Agent: " + display_text, end="\n" if final else "\r")
 
     @client.on("error")
     async def on_error(error):
-        """
-        Handles errors.
-
-        Args:
-            error: The error
-        """
         logging.exception("Client error", exc_info=error)
         print(f"Error: {error}")
         done.set()
 
     @client.on("ended")
     async def on_ended():
-        """
-        Handles the end of the session.
-        """
         print("Session ended")
         done.set()
 
@@ -532,21 +362,18 @@ if __name__ == "__main__":
         raise ValueError("Please set your ULTRAVOX_API_KEY environment variable")
 
     parser = argparse.ArgumentParser(prog="websocket_client.py")
-
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Show verbose session information"
     )
     parser.add_argument(
         "--very-verbose", "-vv", action="store_true", help="Show debug logs too"
     )
-
     parser.add_argument("--voice", "-V", type=str, help="Name (or id) of voice to use")
     parser.add_argument(
         "--system-prompt",
         "-s",
         type=str,
-        default=f"""
-You are a drive-thru order taker for a donut shop called "Dr. Donut". Local time is currently: ${datetime.datetime.now().isoformat()}
+        default="""You are a drive-thru order taker for a donut shop called "Dr. Donut". Local time is currently: ${datetime.datetime.now().isoformat()}
 The user is talking to you over voice on their phone, and your response will be read out loud with realistic text-to-speech (TTS) technology.
 
 Follow every direction here when crafting your response:
@@ -610,7 +437,6 @@ MOCHA LATTE $3.49
 CARAMEL MOCHA LATTE $3.49""",
         help="System prompt to use when creating the call",
     )
-
     parser.add_argument(
         "--temperature",
         type=float,
@@ -620,12 +446,12 @@ CARAMEL MOCHA LATTE $3.49""",
     parser.add_argument(
         "--secret-menu",
         action="store_true",
-        help="Adds prompt and client-implemented tool for a secret menu. For use with the default system prompt.",
+        help="Adds prompt and client-implemented tool for a secret menu",
     )
     parser.add_argument(
         "--experimental-messages",
         type=str,
-        help="Enables the specified experimental messages (e.g. 'debug' which should be used with -v)",
+        help="Enables the specified experimental messages",
     )
     parser.add_argument(
         "--prior-call-id",
