@@ -16,7 +16,10 @@ import requests
 import sounddevice
 from websockets import exceptions as ws_exceptions
 from websockets.asyncio import client as ws_client
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 
 class LocalAudioSink:
     """
@@ -349,8 +352,16 @@ async def main():
         print("Session ended")
         done.set()
 
-    loop.add_signal_handler(signal.SIGINT, lambda: done.set())
-    loop.add_signal_handler(signal.SIGTERM, lambda: done.set())
+    try:
+        # Try to add signal handlers for Unix systems
+        loop.add_signal_handler(signal.SIGINT, lambda: done.set())
+        loop.add_signal_handler(signal.SIGTERM, lambda: done.set())
+    except (NotImplementedError, AttributeError):
+        # On Windows, we'll handle keyboard interrupt directly
+        def windows_signal_handler(signum, frame):
+            done.set()
+        signal.signal(signal.SIGINT, windows_signal_handler)
+
     await client.start()
     await done.wait()
     await client.stop()
