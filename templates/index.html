@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Donut Drive-Thru AI Assistant From Kno2gether</title>
+    <title>Energy Services Call Center AI</title>
     <style>
         :root {
-            --primary-color: #ff6b6b;
-            --secondary-color: #4ecdc4;
-            --accent-color: #ffe66d;
-            --bg-color: #2b2d42;
-            --text-color: #edf2f4;
+            --primary-color: #0066cc;
+            --secondary-color: #00aa55;
+            --accent-color: #ffd700;
+            --bg-color: #1a1a1a;
+            --text-color: #ffffff;
         }
 
         body {
@@ -24,19 +24,7 @@
             color: var(--text-color);
             position: relative;
             overflow: hidden;
-            background: url('/static/donut-bg.jpg') center center;
-            background-size: cover;
-        }
-
-        body::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(135deg, rgba(43, 45, 66, 0.85), rgba(43, 45, 66, 0.75));
-            z-index: 1;
+            background: linear-gradient(135deg, #1a1a1a, #2a2a2a);
         }
 
         .container {
@@ -48,13 +36,6 @@
             width: 100%;
         }
 
-        .logo {
-            width: 120px;
-            height: auto;
-            margin-bottom: 1rem;
-            filter: drop-shadow(0 4px 8px rgba(0,0,0,0.2));
-        }
-
         h1 {
             font-size: 2.5rem;
             margin: 1rem 0 2rem;
@@ -62,31 +43,50 @@
             text-shadow: 0 2px 4px rgba(0,0,0,0.3);
         }
 
-        .drive-thru-window {
-            width: 300px;
-            height: 300px;
-            background: rgba(255, 255, 255, 0.15);
-            border-radius: 50%;
+        .call-center-dashboard {
+            width: 600px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
             padding: 2rem;
             backdrop-filter: blur(10px);
             position: relative;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             margin: 2rem auto;
-            box-shadow: 0 0 20px rgba(0,0,0,0.3),
-                        inset 0 0 20px rgba(255,255,255,0.1);
+            box-shadow: 0 0 20px rgba(0,0,0,0.3);
         }
 
-        .coffee-cup {
-            position: absolute;
-            width: 80px;
-            height: auto;
-            bottom: -20px;
-            right: -20px;
-            transform: rotate(15deg);
-            filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
-            z-index: 3;
+        .dashboard-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-box {
+            background: rgba(0,0,0,0.2);
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            color: var(--text-color);
+            opacity: 0.8;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            color: var(--accent-color);
+            margin-top: 0.5rem;
         }
 
         .voice-button {
@@ -102,7 +102,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            z-index: 2;
+            margin: 2rem auto;
         }
 
         .voice-button::before {
@@ -142,10 +142,6 @@
             transition: transform 0.3s ease;
         }
 
-        .voice-button:hover .button-icon {
-            transform: scale(1.1);
-        }
-
         @keyframes pulse {
             0% { transform: scale(1); opacity: 0.8; }
             100% { transform: scale(1.3); opacity: 0; }
@@ -163,9 +159,9 @@
         }
 
         @keyframes speaking {
-            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255,107,107,0.4); }
-            70% { transform: scale(1.1); box-shadow: 0 0 0 10px rgba(255,107,107,0); }
-            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255,107,107,0); }
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(0,102,204,0.4); }
+            70% { transform: scale(1.1); box-shadow: 0 0 0 10px rgba(0,102,204,0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(0,102,204,0); }
         }
 
         .status {
@@ -178,51 +174,51 @@
         .info {
             margin-top: 2rem;
             padding: 1rem;
-            max-width: 600px;
-            background: rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.1);
             border-radius: 12px;
-            backdrop-filter: blur(5px);
             text-align: center;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
         }
 
         .error {
             margin-top: 1rem;
-            color: var(--primary-color);
+            color: #ff4444;
             padding: 0.5rem;
             border-radius: 4px;
-            background: rgba(255, 107, 107, 0.1);
-            backdrop-filter: blur(5px);
+            background: rgba(255, 68, 68, 0.1);
             display: none;
-            max-width: 600px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-
-        .decorative-elements {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 1;
         }
     </style>
 </head>
 <body>
-    <div class="decorative-elements"></div>
     <div class="container">
-        <img src="/static/donut-logo.png" alt="Donut Drive-Thru Logo" class="logo">
-        <h1>🍩 Donut Drive-Thru AI</h1>
-        <div class="drive-thru-window">
+        <h1>⚡ Energy Services Call Center</h1>
+        <div class="call-center-dashboard">
+            <div class="dashboard-header">
+                <div class="current-time" id="currentTime"></div>
+                <div class="agent-status">AI Agent Status: <span id="agentStatus">Ready</span></div>
+            </div>
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-label">Calls Today</div>
+                    <div class="stat-value" id="callsToday">0</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Avg. Handle Time</div>
+                    <div class="stat-value">2:30</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Resolution Rate</div>
+                    <div class="stat-value">95%</div>
+                </div>
+            </div>
             <button class="voice-button" id="voiceButton">
                 <svg class="button-icon" viewBox="0 0 24 24">
                     <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
                 </svg>
             </button>
-            <img src="/static/coffee-cup.png" alt="Coffee Cup" class="coffee-cup">
+            <div class="status" id="status">Ready to handle customer inquiries</div>
         </div>
-        <div class="status" id="status">Welcome to Donut Drive-Thru! Click to Order</div>
-        <div class="info">Voice interaction will happen in the terminal window. This interface shows your order status.</div>
+        <div class="info">Voice interaction will happen in the terminal window. This dashboard shows call status and metrics.</div>
         <div class="error" id="error"></div>
     </div>
 
@@ -230,7 +226,19 @@
         const voiceButton = document.getElementById('voiceButton');
         const statusText = document.getElementById('status');
         const errorDiv = document.getElementById('error');
+        const agentStatus = document.getElementById('agentStatus');
+        const callsToday = document.getElementById('callsToday');
+        const currentTime = document.getElementById('currentTime');
         let isActive = false;
+        let callCount = 0;
+
+        function updateTime() {
+            const now = new Date();
+            currentTime.textContent = now.toLocaleTimeString();
+        }
+
+        setInterval(updateTime, 1000);
+        updateTime();
 
         function showError(message) {
             errorDiv.textContent = message;
@@ -246,76 +254,77 @@
             
             if (state === 'idle') {
                 button.classList.remove('active');
-                statusText.textContent = 'Welcome to Donut Drive-Thru! Click to Order';
+                statusText.textContent = 'Ready to handle customer inquiries';
+                agentStatus.textContent = 'Ready';
             } else {
-                button.classList.add('active');
-                button.classList.add(state);
-                
-                const stateMessages = {
-                    'listening': 'Listening to your order...',
-                    'thinking': 'Processing your order...',
-                    'speaking': 'Responding to your order...'
-                };
-                
-                statusText.textContent = stateMessages[state];
+                button.classList.add('active', state);
+                if (state === 'listening') {
+                    statusText.textContent = 'Listening to customer...';
+                    agentStatus.textContent = 'Listening';
+                } else if (state === 'thinking') {
+                    statusText.textContent = 'Processing inquiry...';
+                    agentStatus.textContent = 'Processing';
+                } else if (state === 'speaking') {
+                    statusText.textContent = 'Responding to customer...';
+                    agentStatus.textContent = 'Responding';
+                }
             }
         }
 
-        // Simulate state changes for visual feedback
-        let simulatedStates = ['listening', 'thinking', 'speaking'];
-        let currentStateIndex = 0;
-        let stateInterval;
-
-        function startStateSimulation() {
-            currentStateIndex = 0;
-            updateButtonState(simulatedStates[currentStateIndex]);
-            stateInterval = setInterval(() => {
-                currentStateIndex = (currentStateIndex + 1) % simulatedStates.length;
-                updateButtonState(simulatedStates[currentStateIndex]);
-            }, 5000);
-        }
-
-        function stopStateSimulation() {
-            clearInterval(stateInterval);
-            updateButtonState('idle');
-        }
-
-        voiceButton.addEventListener('click', async () => {
-            if (!isActive) {
-                try {
-                    const response = await fetch('/start');
-                    const data = await response.json();
-                    
+        function startSession() {
+            if (isActive) return;
+            
+            fetch('/start')
+                .then(response => response.json())
+                .then(data => {
                     if (data.error) {
                         showError(data.error);
-                        return;
-                    }
-
-                    if (data.status === 'started') {
-                        isActive = true;
-                        startStateSimulation();
                     } else {
-                        showError('Voice Assistant is already running');
+                        isActive = true;
+                        voiceButton.classList.add('active');
+                        callCount++;
+                        callsToday.textContent = callCount;
                     }
-                } catch (error) {
-                    console.error('Failed to start session:', error);
-                    showError('Failed to start session');
-                }
+                })
+                .catch(error => {
+                    showError('Failed to start session: ' + error);
+                });
+        }
+
+        function stopSession() {
+            if (!isActive) return;
+            
+            fetch('/stop')
+                .then(response => response.json())
+                .then(data => {
+                    isActive = false;
+                    voiceButton.classList.remove('active');
+                    updateButtonState('idle');
+                })
+                .catch(error => {
+                    showError('Failed to stop session: ' + error);
+                });
+        }
+
+        voiceButton.addEventListener('click', () => {
+            if (!isActive) {
+                startSession();
             } else {
-                try {
-                    const response = await fetch('/stop');
-                    const data = await response.json();
-                    
-                    if (data.status === 'stopped') {
-                        isActive = false;
-                        stopStateSimulation();
-                    }
-                } catch (error) {
-                    console.error('Failed to stop session:', error);
-                    showError('Failed to stop session');
-                }
+                stopSession();
             }
         });
+
+        // Poll for state updates
+        setInterval(() => {
+            if (isActive) {
+                fetch('/get_state')
+                    .then(response => response.json())
+                    .then(data => {
+                        updateButtonState(data.state);
+                    })
+                    .catch(error => console.error('Failed to get state:', error));
+            }
+        }, 500);
     </script>
 </body>
 </html>
