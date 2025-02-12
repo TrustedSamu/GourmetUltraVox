@@ -4,3 +4,6 @@ websockets==12.0
 sounddevice==0.4.6
 numpy==1.26.2
 pyee==11.0.1
+requests==2.31.0
+python-dotenv==1.0.0
+firebase-admin==6.5.0

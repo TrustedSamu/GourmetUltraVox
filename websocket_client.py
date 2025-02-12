@@ -15,11 +15,17 @@ import pyee.asyncio
 import requests
 import sounddevice
 from websockets import exceptions as ws_exceptions
-from websockets.asyncio import client as ws_client
+from websockets import client as ws_client
 from dotenv import load_dotenv
+from firebase_service import FirebaseService
+from database_tools import DatabaseTools, FirebaseEncoder
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Initialize Firebase service and database tools
+firebase = FirebaseService()
+db_tools = DatabaseTools()
 
 class LocalAudioSink:
     """
@@ -205,26 +211,95 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
             "type": "client_tool_result",
             "invocationId": invocation_id,
         }
-        if tool_name == "getSecretMenu":
-            menu = [
-                {
-                    "date": datetime.date.today().isoformat(),
-                    "items": [
-                        {
-                            "name": "Banana Smoothie",
-                            "price": "$4.99",
-                        },
-                        {
-                            "name": "Butter Pecan Ice Cream (one scoop)",
-                            "price": "$2.99",
-                        },
-                    ],
-                },
-            ]
-            response["result"] = json.dumps(menu)
-        else:
-            response["errorType"] = "undefined"
-            response["errorMessage"] = f"Unknown tool: {tool_name}"
+        
+        try:
+            # User operations
+            if tool_name == "getUser":
+                result = db_tools.get_user(parameters["userId"])
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                
+            elif tool_name == "getAllUsers":
+                result = db_tools.get_all_users()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder)
+
+            # Customer operations
+            elif tool_name == "getCustomer":
+                result = db_tools.get_customer(parameters["customerId"])
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                
+            elif tool_name == "getAllCustomers":
+                result = db_tools.get_all_customers()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder)
+                
+            elif tool_name == "updateCustomer":
+                success = db_tools.update_customer(
+                    parameters["customerId"],
+                    json.loads(parameters["data"])
+                )
+                response["result"] = json.dumps({"success": success}, cls=FirebaseEncoder)
+
+            # Conversation operations
+            elif tool_name == "getConversation":
+                result = db_tools.get_conversation(parameters["conversationId"])
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                
+            elif tool_name == "getUltravoxConversation":
+                result = db_tools.get_ultravox_conversation(parameters["conversationId"])
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                
+            elif tool_name == "getAllConversations":
+                result = db_tools.get_all_conversations()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder)
+                
+            elif tool_name == "getAllUltravoxConversations":
+                result = db_tools.get_all_ultravox_conversations()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder)
+                
+            elif tool_name == "saveConversation":
+                doc_id = db_tools.save_conversation(
+                    json.loads(parameters["data"]),
+                    bool(parameters.get("isUltravox", False))
+                )
+                response["result"] = json.dumps({"conversationId": doc_id}, cls=FirebaseEncoder) if doc_id else None
+
+            # Service status operations
+            elif tool_name == "getServiceStatus":
+                result = db_tools.get_service_status(parameters.get("statusId", "416"))
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                
+            elif tool_name == "updateServiceStatus":
+                success = db_tools.update_service_status(
+                    parameters.get("statusId", "416"),
+                    json.loads(parameters["data"])
+                )
+                response["result"] = json.dumps({"success": success}, cls=FirebaseEncoder)
+
+            # Tariff operations
+            elif tool_name == "getTariff":
+                result = db_tools.get_tariff(parameters["tariffId"])
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                
+            elif tool_name == "getAllTariffs":
+                result = db_tools.get_all_tariffs()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder)
+                
+            elif tool_name == "getResidentialTariff":
+                result = db_tools.get_residential_tariff()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+
+            # Database exploration
+            elif tool_name == "exploreDatabase":
+                result = db_tools.explore_database()
+                response["result"] = json.dumps(result, cls=FirebaseEncoder)
+                
+            else:
+                response["errorType"] = "undefined"
+                response["errorMessage"] = f"Unknown tool: {tool_name}"
+                
+        except Exception as e:
+            response["errorType"] = type(e).__name__
+            response["errorMessage"] = str(e)
+            
         await self._socket.send(json.dumps(response))
 
     async def _pump_audio(self, source: LocalAudioSource):
@@ -268,7 +343,120 @@ async def _get_join_url() -> str:
     async with aiohttp.ClientSession() as session:
         headers = {"X-API-Key": f"{os.getenv('ULTRAVOX_API_KEY', None)}"}
         system_prompt = args.system_prompt
-        selected_tools = []
+        selected_tools = [
+            {
+                "temporaryTool": {
+                    "modelToolName": "getUser",
+                    "description": "Get user information by ID",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getAllUsers",
+                    "description": "Get all users from the database",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getCustomer",
+                    "description": "Get customer information by ID",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getAllCustomers",
+                    "description": "Get all customers from the database",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "updateCustomer",
+                    "description": "Update customer information",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getConversation",
+                    "description": "Get conversation details by ID",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getAllConversations",
+                    "description": "Get all conversations from the database",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getUltravoxConversation",
+                    "description": "Get Ultravox conversation details by ID",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getAllUltravoxConversations",
+                    "description": "Get all Ultravox conversations from the database",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "saveConversation",
+                    "description": "Save a new conversation to the database",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getServiceStatus",
+                    "description": "Get current service status",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "updateServiceStatus",
+                    "description": "Update service status information",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getTariff",
+                    "description": "Get tariff information by ID",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getAllTariffs",
+                    "description": "Get all available tariffs",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "getResidentialTariff",
+                    "description": "Get the residential standard tariff",
+                    "client": {},
+                },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "exploreDatabase",
+                    "description": "Get an overview of all collections and documents",
+                    "client": {},
+                },
+            },
+        ]
         if args.secret_menu:
             system_prompt += "\n\nThere is also a secret menu that changes daily. If the user asks about it, use the getSecretMenu tool to look up today's secret menu items."
             selected_tools.append(
@@ -290,11 +478,10 @@ async def _get_join_url() -> str:
                     "clientBufferSizeMs": 30000,
                 }
             },
+            "selectedTools": selected_tools,  # Always include our database tools
         }
         if args.voice:
             body["voice"] = args.voice
-        if selected_tools:
-            body["selectedTools"] = selected_tools
         if args.initial_output_text:
             body["initialOutputMedium"] = "MESSAGE_MEDIUM_TEXT"
         if args.user_speaks_first:
@@ -384,57 +571,52 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="""You are an AI call center agent for a major energy and utility service provider. Local time is currently: ${datetime.datetime.now().isoformat()}
+        default="""You are an AI assistant that ONLY provides information directly from our Firebase database. You must NEVER make up or hallucinate any information. Local time is currently: ${datetime.datetime.now().isoformat()}
 
-The user is talking to you over the phone, and your response will be read out loud with realistic text-to-speech (TTS) technology.
+Your role is to:
+1. ONLY retrieve and present information that exists in our Firebase database
+2. If information is not found in the database, clearly state that it's not available
+3. Never make assumptions or create fictional data
 
-Follow these guidelines when handling customer inquiries:
+Available Database Collections and Tools:
+1. Tariffs Collection:
+   - Use getAllTariffs to view actual tariff records
+   - Use getTariff with a specific ID to get tariff details
+   - Use getResidentialTariff for standard residential rates
 
-1. Professional and Empathetic Communication
-   - Use a professional, courteous tone
-   - Show empathy for customer concerns
-   - Maintain clear, concise communication
-   - Use simple language, avoiding technical jargon unless necessary
+2. Service Status:
+   - Use getServiceStatus to check current system status
+   - Only report actual status from the database
 
-2. Call Flow Management
-   - Start calls with: "Thank you for calling Energy Services, this is AI Assistant. How may I help you today?"
-   - Verify customer identity when needed (account number, address, etc.)
-   - Listen carefully to the customer's issue
-   - Confirm your understanding before proceeding
-   - Provide clear next steps or resolutions
+3. Customer Records:
+   - Use getCustomer to look up verified customer information
+   - Use getAllCustomers to view existing customer records
 
-3. Common Inquiry Handling
-   - Billing Questions:
-     * Explain charges clearly
-     * Discuss payment options
-     * Handle payment arrangements
-   - Service Issues:
-     * Power outages
-     * Service interruptions
-     * Emergency situations
-   - Account Management:
-     * Account updates
-     * Service transfers
-     * New service requests
+4. User Information:
+   - Use getUser for specific user details
+   - Use getAllUsers to view user records
 
-4. Emergency Protocol
-   - For any life-threatening situations, immediately advise calling 911
-   - For gas leaks or electrical emergencies, provide emergency hotline number
-   - Stay calm and provide clear safety instructions
+5. Conversation Records:
+   - Use getConversation and getUltravoxConversation for specific conversations
+   - Use getAllConversations and getAllUltravoxConversations for all records
+   - Use saveConversation to record new conversations
 
-5. Call Wrap-up
-   - Summarize actions taken or next steps
-   - Confirm if the customer needs anything else
-   - Thank them for choosing our service
-   - Provide relevant reference numbers if applicable
+6. Database Overview:
+   - Use exploreDatabase to see all available collections
 
-Remember to:
-- Never share sensitive customer information
-- Escalate complex issues to human supervisors
-- Document all interactions accurately
-- Follow all regulatory compliance requirements
+IMPORTANT RULES:
+- ONLY provide information that you can verify exists in the database
+- If asked about information that isn't in the database, say "I don't have that information in the database"
+- Do not make up or infer information that isn't explicitly in the database
+- When using tools, always check if the data exists before making statements about it
+- If a database query returns null or empty, clearly communicate this to the user
 
-Your main goal is to resolve customer inquiries efficiently while maintaining high customer satisfaction.""",
+Example responses:
+- If data exists: "According to our database, the current tariff is [exact data from database]"
+- If data doesn't exist: "I've checked the database, but I don't have that information available"
+- If unsure: "Let me check the database for that information" then use the appropriate tool
+
+Remember: Your responses must be based SOLELY on actual database content. Never invent or assume information.""",
         help="System prompt to use when creating the call",
     )
     parser.add_argument(
