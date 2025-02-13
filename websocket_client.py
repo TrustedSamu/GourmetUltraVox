@@ -38,40 +38,61 @@ class LocalAudioSink:
     def __init__(self, sample_rate: int = 48000) -> None:
         self._sample_rate = sample_rate
         self._buffer: bytearray = bytearray()
+        self._stream = None
+        self._setup_stream()
 
-        def callback(outdata: np.ndarray, frame_count, time, status):
-            output_frame_size = len(outdata) * 2
-            next_frame = self._buffer[:output_frame_size]
-            self._buffer[:] = self._buffer[output_frame_size:]
-            if len(next_frame) < output_frame_size:
-                next_frame += b"\x00" * (output_frame_size - len(next_frame))
-            outdata[:] = np.frombuffer(next_frame, dtype="int16").reshape(
-                (frame_count, 1)
+    def _setup_stream(self):
+        try:
+            def callback(outdata: np.ndarray, frame_count, time, status):
+                if status:
+                    logging.warning(f'Audio output status: {status}')
+                output_frame_size = len(outdata) * 2
+                next_frame = self._buffer[:output_frame_size]
+                self._buffer[:] = self._buffer[output_frame_size:]
+                if len(next_frame) < output_frame_size:
+                    next_frame += b"\x00" * (output_frame_size - len(next_frame))
+                outdata[:] = np.frombuffer(next_frame, dtype="int16").reshape(
+                    (frame_count, 1)
+                )
+
+            self._stream = sounddevice.OutputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                callback=callback,
+                device=None,
+                dtype="int16",
+                blocksize=self._sample_rate // 100,
             )
-
-        self._stream = sounddevice.OutputStream(
-            samplerate=sample_rate,
-            channels=1,
-            callback=callback,
-            device=None,
-            dtype="int16",
-            blocksize=sample_rate // 100,
-        )
-        self._stream.start()
-        if not self._stream.active:
-            raise RuntimeError("Failed to start streaming output audio")
+            self._stream.start()
+            if not self._stream.active:
+                raise RuntimeError("Failed to start streaming output audio")
+            logging.info("Audio output stream initialized successfully")
+        except Exception as e:
+            logging.error(f"Error setting up audio output stream: {e}")
+            raise
 
     def write(self, chunk: bytes) -> None:
         """Writes audio data (expected to be in 16-bit PCM format) to this sink's buffer."""
-        self._buffer.extend(chunk)
+        try:
+            self._buffer.extend(chunk)
+        except Exception as e:
+            logging.error(f"Error writing to audio buffer: {e}")
 
     def drop_buffer(self) -> None:
         """Drops all audio data in this sink's buffer, ending playback until new data is written."""
-        self._buffer.clear()
+        try:
+            self._buffer.clear()
+            logging.debug("Audio buffer cleared")
+        except Exception as e:
+            logging.error(f"Error clearing audio buffer: {e}")
 
     async def close(self) -> None:
-        if self._stream:
-            self._stream.close()
+        try:
+            if self._stream:
+                self._stream.close()
+                logging.info("Audio output stream closed")
+        except Exception as e:
+            logging.error(f"Error closing audio stream: {e}")
 
 
 class LocalAudioSource:
@@ -85,27 +106,157 @@ class LocalAudioSource:
 
     def __init__(self, sample_rate=48000):
         self._sample_rate = sample_rate
+        self._stream = None
+        self._running = True
+        # Audio processing settings
+        self._threshold = 0.01  # Will be set by command line arg
+        self._min_audio_duration = 0.35  # Longer duration for stability
+        self._consecutive_frames = 0
+        self._frames_threshold = int(self._min_audio_duration * (sample_rate / (sample_rate // 100)))
+        self._last_audio_time = 0
+        self._min_silence_duration = 1.0  # Longer silence for better switching
+        # Audio level processing
+        self._audio_level_history = []
+        self._history_size = 12  # Larger window for stability
+        self._noise_floor = None  # Initialize as None
+        self._noise_floor_alpha = 0.98  # Slower noise floor adaptation
+        self._noise_multiplier = 2.5  # Higher noise floor impact
+        self._threshold_multiplier = 3.0  # Stricter threshold
+        self._peak_level = 0.0  # Track peak levels
+        self._peak_alpha = 0.99  # Slower peak adaptation
+        self._initial_calibration_frames = 50  # More calibration frames
+        self._calibration_count = 0
+        self._debug_audio = True
+        # Print available devices
+        self._print_audio_devices()
+
+    def _print_audio_devices(self):
+        try:
+            devices = sounddevice.query_devices()
+            default_input = sounddevice.query_devices(kind='input')
+            default_output = sounddevice.query_devices(kind='output')
+            
+            logging.info("=== Audio Device Configuration ===")
+            logging.info(f"Default Input Device: {default_input['name']} (ID: {default_input['index']})")
+            logging.info(f"Default Output Device: {default_output['name']} (ID: {default_output['index']})")
+            logging.info("=== Available Audio Devices ===")
+            for i, dev in enumerate(devices):
+                logging.info(f"Device {i}: {dev['name']} ({'input' if dev['max_input_channels'] > 0 else 'output'})")
+        except Exception as e:
+            logging.error(f"Error querying audio devices: {e}")
+
+    async def close(self):
+        """Cleanup audio resources."""
+        self._running = False
+        try:
+            if self._stream:
+                self._stream.close()
+                self._stream = None
+                logging.info("Audio input stream closed")
+        except Exception as e:
+            logging.error(f"Error closing audio stream: {e}")
 
     async def stream(self) -> AsyncGenerator[bytes, None]:
         queue: asyncio.Queue[bytes] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def callback(indata: np.ndarray, frame_count, time, status):
-            loop.call_soon_threadsafe(queue.put_nowait, indata.tobytes())
+            if status:
+                logging.warning(f'Audio input status: {status}')
+            try:
+                # Calculate RMS with improved noise handling
+                squared = np.square(indata.astype(np.float64))
+                mean_squared = np.mean(squared) if squared.size > 0 else 0
+                audio_level = np.sqrt(max(0, mean_squared))
+                
+                # Initialize or update noise floor during calibration
+                if self._calibration_count < self._initial_calibration_frames:
+                    if self._noise_floor is None:
+                        self._noise_floor = audio_level
+                    else:
+                        self._noise_floor = 0.98 * self._noise_floor + 0.02 * audio_level
+                    self._calibration_count += 1
+                    return
+                
+                # Update peak level and noise floor
+                self._peak_level = max(audio_level, self._peak_level * self._peak_alpha)
+                if audio_level < self._peak_level * 0.2:  # Only update noise floor with quiet audio
+                    self._noise_floor = self._noise_floor_alpha * self._noise_floor + (1 - self._noise_floor_alpha) * audio_level
+                
+                # Add to history and calculate moving average
+                self._audio_level_history.append(audio_level)
+                if len(self._audio_level_history) > self._history_size:
+                    self._audio_level_history.pop(0)
+                
+                # Calculate average excluding outliers
+                sorted_levels = sorted(self._audio_level_history)
+                trimmed_levels = sorted_levels[1:-1] if len(sorted_levels) > 2 else sorted_levels
+                avg_audio_level = np.mean(trimmed_levels) if trimmed_levels else 0
+                
+                current_time = time.currentTime if time else 0
+                
+                # Calculate effective threshold using base threshold and noise floor
+                base_threshold = self._threshold * self._threshold_multiplier
+                noise_threshold = self._noise_floor * self._noise_multiplier
+                effective_threshold = max(base_threshold, noise_threshold)
+                
+                # More stringent audio detection
+                if (not np.isnan(avg_audio_level) and 
+                    avg_audio_level > effective_threshold and 
+                    avg_audio_level > self._noise_floor * 3.0 and  # Must be well above noise
+                    avg_audio_level > self._peak_level * 0.2):  # Must be significant compared to peak
+                    
+                    self._consecutive_frames += 1
+                    if self._consecutive_frames >= self._frames_threshold:
+                        loop.call_soon_threadsafe(queue.put_nowait, indata.tobytes())
+                        if self._debug_audio:
+                            logging.info(f"Audio: {avg_audio_level:.1f}, Peak: {self._peak_level:.1f}, Thresh: {effective_threshold:.1f}, Noise: {self._noise_floor:.1f}")
+                        self._last_audio_time = current_time
+                else:
+                    if current_time - self._last_audio_time > self._min_silence_duration:
+                        self._consecutive_frames = 0
+                        # Slower peak level decay
+                        self._peak_level *= 0.95
+                        if len(self._audio_level_history) > 2:
+                            self._audio_level_history = self._audio_level_history[-2:]
+            except Exception as e:
+                logging.error(f"Error in audio input callback: {e}")
+                self._consecutive_frames = 0
 
-        stream = sounddevice.InputStream(
-            samplerate=self._sample_rate,
-            channels=1,
-            callback=callback,
-            device=None,
-            dtype="int16",
-            blocksize=self._sample_rate // 100,
-        )
-        with stream:
-            if not stream.active:
-                raise RuntimeError("Failed to start streaming input audio")
-            while True:
-                yield await queue.get()
+        try:
+            # Get default input device info
+            device_info = sounddevice.query_devices(kind='input')
+            logging.info(f"Using input device: {device_info['name']} with {device_info['max_input_channels']} channels")
+            logging.info(f"Audio settings: threshold={self._threshold}, min_duration={self._min_audio_duration}s, silence_duration={self._min_silence_duration}s")
+            
+            self._stream = sounddevice.InputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                callback=callback,
+                device=None,  # Use default device
+                dtype="int16",
+                blocksize=self._sample_rate // 100,
+                latency='high'  # Use high latency for better noise filtering
+            )
+            
+            with self._stream:
+                if not self._stream.active:
+                    raise RuntimeError("Failed to start streaming input audio")
+                logging.info(f"Audio input stream initialized successfully with threshold {self._threshold}")
+                while self._running:
+                    try:
+                        yield await queue.get()
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        if self._running:
+                            logging.error(f"Error getting audio data from queue: {e}")
+                        break
+        except Exception as e:
+            logging.error(f"Error in audio input stream: {e}")
+            raise
+        finally:
+            await self.close()
 
 
 class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
@@ -118,10 +269,10 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
         self._url = join_url
         self._socket = None
         self._receive_task: asyncio.Task | None = None
-        self._send_audio_task = asyncio.create_task(
-            self._pump_audio(LocalAudioSource())
-        )
+        self._send_audio_task: asyncio.Task | None = None
         self._sink = LocalAudioSink()
+        self._audio_source = None
+        self._running = True
         self._use_flask_callback = bool(os.getenv('FLASK_STATE_CALLBACK'))
 
     def _update_state(self, new_state: str):
@@ -136,27 +287,48 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
 
     async def start(self):
         """Start the websocket session."""
-        logging.info(f"Connecting to {self._url}")
-        self._socket = await ws_client.connect(self._url)
-        self._receive_task = asyncio.create_task(self._socket_receive(self._socket))
+        self._running = True
+        await self._connect()
 
-    async def _socket_receive(self, socket: ws_client.ClientConnection):
-        try:
-            async for message in socket:
-                await self._on_socket_message(message)
-        except asyncio.CancelledError:
-            logging.info("socket cancelled")
-        except ws_exceptions.ConnectionClosedOK:
-            logging.info("socket closed ok")
-        except ws_exceptions.ConnectionClosedError as e:
-            self.emit("error", e)
-            return
-        logging.info("socket receive done")
-        self.emit("ended")
+    async def _connect(self):
+        """Establish websocket connection with retry logic."""
+        retry_count = 0
+        max_retries = 3
+        retry_delay = 2  # seconds
+
+        while self._running and retry_count < max_retries:
+            try:
+                logging.info(f"Connecting to {self._url} (attempt {retry_count + 1}/{max_retries})")
+                self._socket = await ws_client.connect(self._url)
+                self._receive_task = asyncio.create_task(self._socket_receive(self._socket))
+                
+                # Initialize audio source only after successful connection
+                if not self._audio_source:
+                    self._audio_source = LocalAudioSource()
+                    if hasattr(args, 'mic_threshold'):
+                        self._audio_source._threshold = args.mic_threshold
+                
+                self._send_audio_task = asyncio.create_task(self._pump_audio(self._audio_source))
+                
+                logging.info("Connection established successfully")
+                return True
+            except Exception as e:
+                logging.error(f"Connection attempt {retry_count + 1} failed: {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logging.info(f"Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+        
+        logging.error("Failed to establish connection after maximum retries")
+        return False
 
     async def stop(self):
         """End the session, closing the connection and ending the call."""
-        logging.info("Stopping...")
+        self._running = False
+        logging.info("Stopping session...")
+        if self._audio_source:
+            await self._audio_source.close()
         await _async_close(
             self._sink.close(),
             self._socket.close() if self._socket else None,
@@ -165,43 +337,83 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
         if self._state != "idle":
             self._update_state("idle")
 
+    async def _socket_receive(self, socket: ws_client.ClientConnection):
+        try:
+            async for message in socket:
+                try:
+                    await self._on_socket_message(message)
+                except Exception as e:
+                    logging.error(f"Error processing message: {e}")
+        except asyncio.CancelledError:
+            logging.info("Socket receive cancelled")
+        except ws_exceptions.ConnectionClosedOK:
+            logging.info("Socket closed normally")
+        except ws_exceptions.ConnectionClosedError as e:
+            logging.error(f"Socket closed with error: {e}")
+            self.emit("error", e)
+            return
+        except Exception as e:
+            logging.error(f"Unexpected error in socket receive: {e}")
+        finally:
+            logging.info("Socket receive completed")
+            self.emit("ended")
+
     async def _on_socket_message(self, payload: str | bytes):
         if isinstance(payload, bytes):
-            self._sink.write(payload)
+            try:
+                self._sink.write(payload)
+            except Exception as e:
+                logging.error(f"Error writing to audio sink: {e}")
             return
         elif isinstance(payload, str):
-            msg = json.loads(payload)
-            await self._handle_data_message(msg)
+            try:
+                msg = json.loads(payload)
+                await self._handle_data_message(msg)
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding message: {e}")
+            except Exception as e:
+                logging.error(f"Error handling message: {e}")
 
     async def _handle_data_message(self, msg: dict[str, Any]):
-        match msg["type"]:
-            case "playback_clear_buffer":
-                self._sink.drop_buffer()
-            case "state":
-                self._update_state(msg["state"])
-            case "transcript":
-                # Handle only agent transcripts, ignore user transcripts
-                if msg["role"] != "agent":
-                    return
-                if msg.get("text", None):
-                    self._pending_output = msg["text"]
-                    self.emit("output", msg["text"], msg["final"])
-                else:
-                    self._pending_output += msg.get("delta", "")
-                    self.emit("output", self._pending_output, msg["final"])
-                if msg["final"]:
-                    self._pending_output = ""
-            case "voice_synced_transcript":
-                # Just ignore voice synced transcripts
-                pass
-            case "client_tool_invocation":
-                await self._handle_client_tool_call(
-                    msg["toolName"], msg["invocationId"], msg["parameters"]
-                )
-            case "debug":
-                logging.info(f"debug: {msg['message']}")
-            case _:
-                logging.warning(f"Unhandled message type: {msg['type']}")
+        try:
+            match msg["type"]:
+                case "playback_clear_buffer":
+                    self._sink.drop_buffer()
+                    logging.debug("Audio buffer cleared")
+                case "state":
+                    old_state = self._state
+                    self._update_state(msg["state"])
+                    logging.info(f"State changed from {old_state} to {msg['state']}")
+                case "transcript":
+                    # Handle only agent transcripts, ignore user transcripts
+                    if msg["role"] != "agent":
+                        if msg.get("final", False):
+                            logging.info(f"User input (final): {msg.get('text', '')}")
+                        return
+                    if msg.get("text", None):
+                        self._pending_output = msg["text"]
+                        self.emit("output", msg["text"], msg["final"])
+                        if msg["final"]:
+                            logging.info(f"Agent output (final): {msg['text']}")
+                    else:
+                        self._pending_output += msg.get("delta", "")
+                        self.emit("output", self._pending_output, msg["final"])
+                    if msg["final"]:
+                        self._pending_output = ""
+                case "voice_synced_transcript":
+                    logging.debug("Received voice sync transcript")
+                    pass
+                case "client_tool_invocation":
+                    logging.info(f"Handling tool call: {msg['toolName']}")
+                    await self._handle_client_tool_call(
+                        msg["toolName"], msg["invocationId"], msg["parameters"]
+                    )
+                case "debug":
+                    logging.info(f"Debug message: {msg['message']}")
+                case _:
+                    logging.warning(f"Unhandled message type: {msg['type']}")
+        except Exception as e:
+            logging.error(f"Error in handle_data_message: {e}")
 
     async def _handle_client_tool_call(
         self, tool_name: str, invocation_id: str, parameters: dict[str, Any]
@@ -303,10 +515,30 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
         await self._socket.send(json.dumps(response))
 
     async def _pump_audio(self, source: LocalAudioSource):
-        async for chunk in source.stream():
-            if self._socket is None:
-                continue
-            await self._socket.send(chunk)
+        """Pump audio data with connection state checking."""
+        while self._running:
+            try:
+                async for chunk in source.stream():
+                    if not self._running:
+                        break
+                    if not self._socket or not self._socket.open:
+                        logging.warning("Socket not connected, buffering audio...")
+                        await asyncio.sleep(0.1)
+                        continue
+                    try:
+                        await self._socket.send(chunk)
+                    except ws_exceptions.ConnectionClosed:
+                        logging.warning("Connection closed while sending audio")
+                        break
+                    except Exception as e:
+                        logging.error(f"Error sending audio chunk: {e}")
+                        break
+            except Exception as e:
+                if self._running:
+                    logging.error(f"Error in audio pump: {e}")
+                    await asyncio.sleep(1)  # Wait before retrying
+                else:
+                    break
 
 
 async def _async_close(*awaitables_or_none: Awaitable | None):
@@ -513,20 +745,44 @@ def _add_query_param(url: str, key: str, value: str) -> str:
 async def main():
     join_url = await _get_join_url()
     client = WebsocketVoiceSession(join_url)
+    
+    db_tools = DatabaseTools()
     done = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     @client.on("state")
     async def on_state(state):
         if state == "listening":
-            print("User:  ", end="\r")
+            print("\nUser:  ", end="", flush=True)
         elif state == "thinking":
-            print("Agent: ", end="\r")
+            print("\nAgent: ", end="", flush=True)
 
     @client.on("output")
     async def on_output(text, final):
         display_text = f"{text.strip()}"
-        print("Agent: " + display_text, end="\n" if final else "\r")
+        if final:
+            print(display_text)
+        else:
+            print(display_text, end="\r", flush=True)
+        if final:
+            # Save the conversation
+            conversation_data = {
+                "timestamp": datetime.datetime.now(),
+                "text": text.strip(),
+                "type": "agent"
+            }
+            db_tools.save_conversation(conversation_data, is_ultravox=True)
+
+    @client.on("input")
+    async def on_input(text, final):
+        if final:
+            # Save the user input
+            conversation_data = {
+                "timestamp": datetime.datetime.now(),
+                "text": text.strip(),
+                "type": "user"
+            }
+            db_tools.save_conversation(conversation_data, is_ultravox=True)
 
     @client.on("error")
     async def on_error(error):
@@ -536,18 +792,33 @@ async def main():
 
     @client.on("ended")
     async def on_ended():
-        print("Session ended")
-        done.set()
+        try:
+            print("\nSession ended.")  # Add newline and period
+            logging.info("Session ended normally")
+        except Exception as e:
+            logging.error(f"Error during session end: {e}")
+        finally:
+            done.set()
 
     try:
         # Try to add signal handlers for Unix systems
-        loop.add_signal_handler(signal.SIGINT, lambda: done.set())
-        loop.add_signal_handler(signal.SIGTERM, lambda: done.set())
+        loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(handle_shutdown()))
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(handle_shutdown()))
     except (NotImplementedError, AttributeError):
         # On Windows, we'll handle keyboard interrupt directly
         def windows_signal_handler(signum, frame):
-            done.set()
+            asyncio.create_task(handle_shutdown())
         signal.signal(signal.SIGINT, windows_signal_handler)
+
+    async def handle_shutdown():
+        """Handle graceful shutdown of the application."""
+        try:
+            print("\nShutting down...")
+            logging.info("Starting graceful shutdown")
+            done.set()
+            await client.stop()
+        except Exception as e:
+            logging.error(f"Error during shutdown: {e}")
 
     await client.start()
     await done.wait()
@@ -571,52 +842,40 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="""You are an AI assistant that ONLY provides information directly from our Firebase database. You must NEVER make up or hallucinate any information. Local time is currently: ${datetime.datetime.now().isoformat()}
+        default="""Sie sind ein KI-Assistent für ein Energieversorgungsunternehmen und sprechen ausschließlich Deutsch. Sie haben Zugriff auf unsere Firebase-Datenbank und nutzen diese für genaue Informationen.
 
-Your role is to:
-1. ONLY retrieve and present information that exists in our Firebase database
-2. If information is not found in the database, clearly state that it's not available
-3. Never make assumptions or create fictional data
+Wichtige Sprachregeln:
+1. Sprechen Sie ALLE Zahlen einzeln aus (z.B. Kundennummer 12345 als "eins-zwei-drei-vier-fünf")
+2. Sprechen Sie ausschließlich Deutsch
+3. Verwenden Sie höfliche Anrede (Sie-Form)
+4. Nutzen Sie deutsche Fachbegriffe für den Energiesektor
 
-Available Database Collections and Tools:
-1. Tariffs Collection:
-   - Use getAllTariffs to view actual tariff records
-   - Use getTariff with a specific ID to get tariff details
-   - Use getResidentialTariff for standard residential rates
+Verfügbare Datenbank-Funktionen:
+1. Kundeninformationen:
+   - getCustomer(customer_id): Kundendetails abrufen
+   - getAllCustomers(): Alle Kundendatensätze anzeigen
 
-2. Service Status:
-   - Use getServiceStatus to check current system status
-   - Only report actual status from the database
+2. Servicestatus:
+   - getServiceStatus(): Aktuellen Systemstatus prüfen
+   - updateServiceStatus(status_id, data): Servicestatus aktualisieren
 
-3. Customer Records:
-   - Use getCustomer to look up verified customer information
-   - Use getAllCustomers to view existing customer records
+3. Tarife:
+   - getTariff(tariff_id): Tarifdetails abrufen
+   - getAllTariffs(): Alle verfügbaren Tarife anzeigen
+   - getResidentialTariff(): Standard-Haushaltstarif abrufen
 
-4. User Information:
-   - Use getUser for specific user details
-   - Use getAllUsers to view user records
+4. Gesprächsverlauf:
+   - getConversation(conversation_id): Spezifisches Gespräch abrufen
+   - getAllConversations(): Alle Gespräche anzeigen
+   - saveConversation(data): Neues Gespräch speichern
 
-5. Conversation Records:
-   - Use getConversation and getUltravoxConversation for specific conversations
-   - Use getAllConversations and getAllUltravoxConversations for all records
-   - Use saveConversation to record new conversations
+Beim Verwenden der Funktionen:
+1. Prüfen Sie immer, ob die Information in der Datenbank existiert
+2. Falls Daten nicht gefunden werden, kommunizieren Sie dies klar
+3. Verwenden Sie Fehlerbehandlung beim Datenbankzugriff
+4. Behalten Sie den Gesprächskontext für Folgefragen im Auge
 
-6. Database Overview:
-   - Use exploreDatabase to see all available collections
-
-IMPORTANT RULES:
-- ONLY provide information that you can verify exists in the database
-- If asked about information that isn't in the database, say "I don't have that information in the database"
-- Do not make up or infer information that isn't explicitly in the database
-- When using tools, always check if the data exists before making statements about it
-- If a database query returns null or empty, clearly communicate this to the user
-
-Example responses:
-- If data exists: "According to our database, the current tariff is [exact data from database]"
-- If data doesn't exist: "I've checked the database, but I don't have that information available"
-- If unsure: "Let me check the database for that information" then use the appropriate tool
-
-Remember: Your responses must be based SOLELY on actual database content. Never invent or assume information.""",
+Aktuelle Uhrzeit: ${datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""",
         help="System prompt to use when creating the call",
     )
     parser.add_argument(
@@ -655,10 +914,40 @@ Remember: Your responses must be based SOLELY on actual database content. Never 
         type=int,
         help="API version to set when creating the call.",
     )
+    parser.add_argument(
+        "--mic-threshold",
+        type=float,
+        default=0.01,
+        help="Microphone sensitivity threshold (0.0 to 1.0, default: 0.01)",
+    )
 
     args = parser.parse_args()
     if args.very_verbose:
-        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+        logging.basicConfig(
+            stream=sys.stdout,
+            level=logging.DEBUG,
+            format='%(levelname)s: %(message)s'
+        )
     elif args.verbose:
-        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-    asyncio.run(main())
+        logging.basicConfig(
+            stream=sys.stdout,
+            level=logging.INFO,
+            format='%(levelname)s: %(message)s'
+        )
+    else:
+        logging.basicConfig(
+            stream=sys.stdout,
+            level=logging.WARNING,
+            format='%(levelname)s: %(message)s'
+        )
+
+    # Remove binary debug logging
+    logging.getLogger('websockets').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Application terminated by user")
+    except Exception as e:
+        logging.error(f"Application error: {e}", exc_info=True)
