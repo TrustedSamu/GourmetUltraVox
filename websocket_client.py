@@ -238,6 +238,68 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                 )
                 response["result"] = json.dumps({"success": success}, cls=FirebaseEncoder)
 
+            elif tool_name == "updateAbschlag":
+                try:
+                    # Get first customer and show what we're working with
+                    customers = db_tools.get_all_customers()
+                    
+                    if customers:
+                        customer = customers[0]
+                        kundennummer = customer.get("kundennummer", "")
+                        logging.info(f"Working with customer: {kundennummer}")
+                        
+                        # Get the amount directly from the parameters
+                        new_amount = float(parameters.get("new_amount", 0))
+                        logging.info(f"Amount from parameters: {new_amount}")
+                        
+                        if new_amount <= 0:
+                            response["result"] = json.dumps({
+                                "success": False,
+                                "message": "Der Abschlagsbetrag muss größer als 0 sein."
+                            })
+                            return
+                            
+                        # Create the update data with the correct structure
+                        update_data = {
+                            "abschlag": {
+                                "betrag": new_amount,
+                                "zahlungsrhythmus": customer.get("abschlag", {}).get("zahlungsrhythmus", "monatlich"),
+                                "naechsteFaelligkeit": customer.get("abschlag", {}).get("naechsteFaelligkeit", 
+                                    datetime.datetime.now().isoformat())
+                            }
+                        }
+                        
+                        # Update the customer record
+                        success = db_tools.update_customer(kundennummer, update_data)
+                        
+                        if success:
+                            response["result"] = json.dumps({
+                                "success": True,
+                                "message": f"Der Abschlag wurde erfolgreich auf {new_amount} Euro aktualisiert."
+                            }, cls=FirebaseEncoder)
+                        else:
+                            response["result"] = json.dumps({
+                                "success": False,
+                                "message": "Die Aktualisierung des Abschlags ist fehlgeschlagen."
+                            })
+                    else:
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Keine Kunden in der Datenbank gefunden."
+                        })
+                except ValueError as e:
+                    logging.error(f"Error parsing amount: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Der angegebene Betrag konnte nicht als Zahl erkannt werden."
+                    })
+                except Exception as e:
+                    logging.error(f"Error in updateAbschlag: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Ein Fehler ist aufgetreten: " + str(e)
+                    })
+
             # Conversation operations
             elif tool_name == "getConversation":
                 result = db_tools.get_conversation(parameters["conversationId"])
@@ -378,6 +440,24 @@ async def _get_join_url() -> str:
                     "description": "Update customer information",
                     "client": {},
                 },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "updateAbschlag",
+                    "description": "Aktualisiert den Abschlag für einen Kunden. Beispiel: 'Ändere den Abschlag auf 88 Euro'",
+                    "client": {},
+                    "dynamicParameters": [
+                        {
+                            "name": "new_amount",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "number",
+                                "description": "Der neue Abschlagsbetrag in Euro (z.B. 88 für 88 Euro)"
+                            },
+                            "required": True
+                        }
+                    ]
+                }
             },
             {
                 "temporaryTool": {
@@ -571,52 +651,7 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="""You are an AI assistant that ONLY provides information directly from our Firebase database. You must NEVER make up or hallucinate any information. Local time is currently: ${datetime.datetime.now().isoformat()}
-
-Your role is to:
-1. ONLY retrieve and present information that exists in our Firebase database
-2. If information is not found in the database, clearly state that it's not available
-3. Never make assumptions or create fictional data
-
-Available Database Collections and Tools:
-1. Tariffs Collection:
-   - Use getAllTariffs to view actual tariff records
-   - Use getTariff with a specific ID to get tariff details
-   - Use getResidentialTariff for standard residential rates
-
-2. Service Status:
-   - Use getServiceStatus to check current system status
-   - Only report actual status from the database
-
-3. Customer Records:
-   - Use getCustomer to look up verified customer information
-   - Use getAllCustomers to view existing customer records
-
-4. User Information:
-   - Use getUser for specific user details
-   - Use getAllUsers to view user records
-
-5. Conversation Records:
-   - Use getConversation and getUltravoxConversation for specific conversations
-   - Use getAllConversations and getAllUltravoxConversations for all records
-   - Use saveConversation to record new conversations
-
-6. Database Overview:
-   - Use exploreDatabase to see all available collections
-
-IMPORTANT RULES:
-- ONLY provide information that you can verify exists in the database
-- If asked about information that isn't in the database, say "I don't have that information in the database"
-- Do not make up or infer information that isn't explicitly in the database
-- When using tools, always check if the data exists before making statements about it
-- If a database query returns null or empty, clearly communicate this to the user
-
-Example responses:
-- If data exists: "According to our database, the current tariff is [exact data from database]"
-- If data doesn't exist: "I've checked the database, but I don't have that information available"
-- If unsure: "Let me check the database for that information" then use the appropriate tool
-
-Remember: Your responses must be based SOLELY on actual database content. Never invent or assume information.""",
+        default="Ich bin ein KI-Assistent von Feudenheim Energie. Ich helfe bei Kundenanfragen und Abschlagsanderungen.",
         help="System prompt to use when creating the call",
     )
     parser.add_argument(
