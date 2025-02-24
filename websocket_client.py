@@ -224,8 +224,40 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
 
             # Customer operations
             elif tool_name == "getCustomer":
-                result = db_tools.get_customer(parameters["customerId"])
-                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                try:
+                    kundennummer = parameters.get("kundennummer")
+                    logging.info(f"Looking up customer with Kundennummer: {kundennummer}")
+                    result = db_tools.get_customer(kundennummer)
+                    if result:
+                        logging.info("Customer found")
+                        # Prepare stage change with customer data
+                        stage_response = {
+                            "type": "client_tool_result",
+                            "responseType": "new-stage",
+                            "body": {
+                                "systemPrompt": """Wie kann ich Ihnen helfen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie die gespeicherten Kundendaten für personalisierte Antworten
+- Bei Abschlagsänderung: changeStage zu abschlag_management
+- Bleiben Sie stets höflich und professionell""",
+                                "customer_context": result,
+                                "toolResultText": "Kunde verifiziert"
+                            }
+                        }
+                        response["result"] = json.dumps(stage_response, cls=FirebaseEncoder)
+                    else:
+                        logging.info("Customer not found")
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Entschuldigung, ich konnte diese Kundennummer leider nicht finden. Könnten Sie sie bitte noch einmal überprüfen?"
+                        })
+                except Exception as e:
+                    logging.error(f"Error in getCustomer: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Entschuldigung, bei der Kundensuche ist ein Fehler aufgetreten. Können Sie die Nummer bitte noch einmal nennen?"
+                    })
                 
             elif tool_name == "getAllCustomers":
                 result = db_tools.get_all_customers()
@@ -354,6 +386,95 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                 result = db_tools.explore_database()
                 response["result"] = json.dumps(result, cls=FirebaseEncoder)
                 
+            elif tool_name == "changeStage":
+                try:
+                    stage = parameters.get("stage")
+                    customer_data = parameters.get("customer_data", {})
+                    
+                    # Define stage-specific system prompts
+                    stage_prompts = {
+                        "authentication": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie getCustomer mit der genannten Kundennummer
+- Bei erfolgreicher Verifizierung: changeStage zu customer_service mit Kundendaten
+- Bei Fehler: Höflich erneut nach Nummer fragen
+- Bei Abschlagsänderung später: changeStage zu abschlag_management
+- Bleiben Sie stets höflich und professionell
+- Verwenden Sie die Kundennummer exakt wie angegeben""",
+                        
+                        "customer_service": """Wie kann ich Ihnen helfen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie die gespeicherten Kundendaten für personalisierte Antworten
+- Bei Abschlagsänderung: changeStage zu abschlag_management
+- Wenn der Kunde das Gespräch beenden möchte: Nutzen Sie endCall
+- Bei "Auf Wiederhören" oder ähnlichen Antworten: Nutzen Sie endCall
+- Bleiben Sie stets höflich und professionell""",
+                        
+                        "abschlag_management": """Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie updateAbschlag mit dem genannten Betrag
+- Bestätigen Sie die erfolgreiche Änderung
+- Fragen Sie, ob Sie noch bei etwas anderem helfen können
+- Wenn der Kunde das Gespräch beenden möchte: Nutzen Sie endCall
+- Bei "Nein, danke" oder ähnlichen Antworten: Nutzen Sie endCall""",
+                    }
+
+                    # Get the appropriate prompt and format it with customer data if available
+                    prompt = stage_prompts.get(stage, args.system_prompt)
+                    if customer_data:
+                        try:
+                            name = customer_data.get("name", "dem Kunden")
+                            current_amount = customer_data.get("abschlag", {}).get("betrag", "0")
+                            prompt = prompt.format(name=name, current_amount=current_amount)
+                        except KeyError:
+                            # If formatting fails, use the prompt as is
+                            pass
+                    
+                    # Split the prompt into customer-facing and internal parts
+                    parts = prompt.split("===INTERNAL_INSTRUCTIONS===")
+                    customer_prompt = parts[0].strip()
+                    internal_instructions = parts[1].strip() if len(parts) > 1 else ""
+                    
+                    # Prepare the stage change response with separated prompts
+                    stage_response = {
+                        "type": "client_tool_result",
+                        "responseType": "new-stage",
+                        "body": {
+                            "systemPrompt": f"{customer_prompt}\n\n{internal_instructions}",
+                            "toolResultText": "OK"
+                        }
+                    }
+                    
+                    if customer_data:
+                        stage_response["body"]["customer_context"] = customer_data
+                    
+                    response["result"] = json.dumps(stage_response, cls=FirebaseEncoder)
+                    
+                except Exception as e:
+                    logging.error(f"Error in changeStage: {str(e)}")
+                    response["errorType"] = "StageChangeError"
+                    response["errorMessage"] = f"Failed to change stage: {str(e)}"
+
+            elif tool_name == "endCall":
+                try:
+                    # Send a friendly goodbye message
+                    response["result"] = json.dumps({
+                        "success": True,
+                        "message": "Vielen Dank für Ihren Anruf. Auf Wiederhören!",
+                        "shouldEndCall": True
+                    })
+                    # Set the done event to end the call
+                    asyncio.create_task(self.stop())
+                except Exception as e:
+                    logging.error(f"Error ending call: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Ein Fehler ist aufgetreten beim Beenden des Gesprächs."
+                    })
+
             else:
                 response["errorType"] = "undefined"
                 response["errorMessage"] = f"Unknown tool: {tool_name}"
@@ -408,6 +529,34 @@ async def _get_join_url() -> str:
         selected_tools = [
             {
                 "temporaryTool": {
+                    "modelToolName": "changeStage",
+                    "description": "Changes the conversation stage. Used for transitioning between different phases of the conversation.",
+                    "client": {},
+                    "dynamicParameters": [
+                        {
+                            "name": "stage",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "string",
+                                "description": "The stage to transition to (authentication, customer_service, abschlag_management)",
+                                "enum": ["authentication", "customer_service", "abschlag_management"]
+                            },
+                            "required": True
+                        },
+                        {
+                            "name": "customer_data",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "object",
+                                "description": "Customer data to carry forward to next stage"
+                            },
+                            "required": False
+                        }
+                    ]
+                }
+            },
+            {
+                "temporaryTool": {
                     "modelToolName": "getUser",
                     "description": "Get user information by ID",
                     "client": {},
@@ -423,8 +572,19 @@ async def _get_join_url() -> str:
             {
                 "temporaryTool": {
                     "modelToolName": "getCustomer",
-                    "description": "Get customer information by ID",
+                    "description": "Sucht einen Kunden anhand seiner Kundennummer",
                     "client": {},
+                    "dynamicParameters": [
+                        {
+                            "name": "kundennummer",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "string",
+                                "description": "Die Kundennummer des Kunden"
+                            },
+                            "required": True
+                        }
+                    ]
                 },
             },
             {
@@ -535,6 +695,13 @@ async def _get_join_url() -> str:
                     "description": "Get an overview of all collections and documents",
                     "client": {},
                 },
+            },
+            {
+                "temporaryTool": {
+                    "modelToolName": "endCall",
+                    "description": "Beendet das Gespräch nach erfolgreicher Bearbeitung des Anliegens",
+                    "client": {},
+                }
             },
         ]
         if args.secret_menu:
@@ -651,7 +818,15 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="Ich bin ein KI-Assistent von Feudenheim Energie. Ich helfe bei Kundenanfragen und Abschlagsanderungen.",
+        default="""Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie getCustomer mit der genannten Kundennummer
+- Bei erfolgreicher Verifizierung: changeStage zu customer_service mit Kundendaten
+- Bei Fehler: Höflich erneut nach Nummer fragen
+- Bei Abschlagsänderung später: changeStage zu abschlag_management
+- Bleiben Sie stets höflich und professionell
+- Verwenden Sie die Kundennummer exakt wie angegeben""",
         help="System prompt to use when creating the call",
     )
     parser.add_argument(
