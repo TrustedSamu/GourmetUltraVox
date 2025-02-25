@@ -27,22 +27,39 @@ The system uses WebSocket-based communication for real-time voice processing and
 
 ## Setup
 
-1. Install Python 3.8+ and dependencies:
+1. Install uv (if not already installed):
+```bash
+pip install uv
+```
+
+2. Create and activate a virtual environment with uv:
+```bash
+# Create a new virtual environment
+uv venv
+
+# Activate the virtual environment
+# On Windows:
+.venv/Scripts/activate
+# On Unix/MacOS:
+source .venv/bin/activate
+```
+
+3. Install dependencies using uv:
 ```bash
 uv pip install -r requirements.txt
 ```
 
-2. Set up your environment variables:
+4. Set up your environment variables:
 ```bash
 export ULTRAVOX_API_KEY='your_api_key_here'
 ```
 
-3. Start the web interface:
+5. Start the web interface:
 ```bash
 python web_app.py
 ```
 
-4. Launch the WebSocket client:
+6. Launch the WebSocket client:
 ```bash
 python websocket_client.py
 ```
