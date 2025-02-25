@@ -238,11 +238,13 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                                 "systemPrompt": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Prüfen Sie die genannte Kundennummer mit getCustomer
-- Bei erfolgreicher Prüfung: Bestätigen Sie kurz und fragen Sie direkt nach dem Anliegen
-- Bei Fehler: Höflich um erneute Nennung der Nummer bitten
-- Bleiben Sie stets höflich und professionell
-- Verwenden Sie die Kundennummer exakt wie angegeben""",
+- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
+- Fügen Sie KEINE zusätzlichen Ziffern hinzu
+- Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
+- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
+- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
+- Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
+- Bleiben Sie stets höflich und professionell""",
                                 "customer_context": result,
                                 "toolResultText": "Kunde verifiziert"
                             }
@@ -289,6 +291,9 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                     # Get the amount directly from the parameters
                     new_amount = float(parameters.get("new_amount", 0))
                     logging.info(f"Amount from parameters: {new_amount}")
+                    
+                    # Convert to integer if it's a whole number
+                    new_amount = int(new_amount) if new_amount.is_integer() else new_amount
                     
                     if new_amount <= 0:
                         response["result"] = json.dumps({
@@ -397,25 +402,30 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                         "authentication": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Prüfen Sie die genannte Kundennummer mit getCustomer
-- Bei erfolgreicher Prüfung: Bestätigen Sie kurz und fragen Sie direkt nach dem Anliegen
-- Bei Fehler: Höflich um erneute Nennung der Nummer bitten
-- Bleiben Sie stets höflich und professionell
-- Verwenden Sie die Kundennummer exakt wie angegeben""",
+- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
+- Fügen Sie KEINE zusätzlichen Ziffern hinzu
+- Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
+- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
+- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
+- Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
+- Bleiben Sie stets höflich und professionell""",
                         
                         "customer_service": """Wie kann ich Ihnen heute helfen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie die Kundendaten für personalisierte Antworten
-- Bei Abschlagsfragen: Direkt den aktuellen Betrag nennen und nach Änderungswunsch fragen
+- Nutzen Sie die verifizierten Kundendaten für personalisierte Antworten
+- Verwenden Sie nur die bestätigte Kundennummer für alle Operationen
+- Bei Abschlagsfragen: Sprechen Sie den aktuellen Betrag in korrektem Deutsch aus (z.B. vierhundertzweiunddreißig Euro)
 - Bei unklarer Anfrage: Höflich nachfragen
 - Bleiben Sie stets höflich und professionell""",
                         
                         "abschlag_management": """Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie updateAbschlag mit dem genannten Betrag
-- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung
+- Nutzen Sie updateAbschlag nur mit den verifizierten Kundendaten
+- Wiederholen Sie den genannten Betrag zur Bestätigung
+- Sprechen Sie Beträge immer in korrektem Deutsch aus (z.B. vierhundertzweiunddreißig Euro)
+- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung mit dem Betrag in Worten
 - Fragen Sie "Kann ich sonst noch etwas für Sie tun?"
 - Bei weiteren Anliegen: Direkt nach dem neuen Anliegen fragen
 - Bleiben Sie stets höflich und professionell"""}
@@ -766,6 +776,35 @@ def _add_query_param(url: str, key: str, value: str) -> str:
     query.update({key: value})
     url_parts[4] = urllib.parse.urlencode(query)
     return urllib.parse.urlunparse(url_parts)
+
+
+def _convert_to_german_number_words(number: int) -> str:
+    """Convert a number to German words."""
+    units = ["", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun"]
+    teens = ["zehn", "elf", "zwölf", "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn"]
+    tens = ["", "", "zwanzig", "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig", "neunzig"]
+    
+    if number < 0:
+        return f"minus {_convert_to_german_number_words(abs(number))}"
+    if number == 0:
+        return "null"
+    if number < 10:
+        return units[number]
+    if number < 20:
+        return teens[number - 10]
+    if number < 100:
+        unit = number % 10
+        ten = number // 10
+        if unit == 0:
+            return tens[ten]
+        return f"{units[unit]}und{tens[ten]}"
+    if number < 1000:
+        hundreds = number // 100
+        rest = number % 100
+        if rest == 0:
+            return f"{units[hundreds]}hundert"
+        return f"{units[hundreds]}hundert{_convert_to_german_number_words(rest)}"
+    return str(number)  # For larger numbers, return as is
 
 
 async def main():
