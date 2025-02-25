@@ -235,16 +235,15 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                             "type": "client_tool_result",
                             "responseType": "new-stage",
                             "body": {
-                                "systemPrompt": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
+                                "systemPrompt": """Guten Tag! Hier ist Mr Cerealien. Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
-- Fügen Sie KEINE zusätzlichen Ziffern hinzu
-- Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
-- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
-- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
-- Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
-- Bleiben Sie stets höflich und professionell""",
+- Nutzen Sie getCustomer mit der genannten Kundennummer
+- Bei erfolgreicher Verifizierung: changeStage zu customer_service mit Kundendaten
+- Bei Fehler: Höflich erneut nach Nummer fragen
+- Bei Abschlagsänderung später: changeStage zu abschlag_management
+- Bleiben Sie stets höflich und professionell
+- Verwenden Sie die Kundennummer exakt wie angegeben""",
                                 "customer_context": result,
                                 "toolResultText": "Kunde verifiziert"
                             }
@@ -399,35 +398,31 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                     
                     # Define stage-specific system prompts
                     stage_prompts = {
-                        "authentication": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
+                        "authentication": """Guten Tag! Hier ist Mr Cerealien. Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
-- Fügen Sie KEINE zusätzlichen Ziffern hinzu
-- Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
-- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
-- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
-- Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
-- Bleiben Sie stets höflich und professionell""",
+- Nutzen Sie getCustomer mit der genannten Kundennummer
+- Bei erfolgreicher Verifizierung: changeStage zu customer_service mit Kundendaten
+- Bei Fehler: Höflich erneut nach Nummer fragen
+- Bei Abschlagsänderung später: changeStage zu abschlag_management
+- Bleiben Sie stets höflich und professionell
+- Verwenden Sie die Kundennummer exakt wie angegeben""",
                         
                         "customer_service": """Wie kann ich Ihnen heute helfen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie die verifizierten Kundendaten für personalisierte Antworten
-- Verwenden Sie nur die bestätigte Kundennummer für alle Operationen
-- Bei Abschlagsfragen: Sprechen Sie den aktuellen Betrag in korrektem Deutsch aus (z.B. vierhundertzweiunddreißig Euro)
+- Nutzen Sie die verifizierten Kundendaten
+- Bei Abschlagsfragen: Direkt den aktuellen Betrag nennen und nach dem gewünschten neuen Betrag fragen
 - Bei unklarer Anfrage: Höflich nachfragen
 - Bleiben Sie stets höflich und professionell""",
                         
                         "abschlag_management": """Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie updateAbschlag nur mit den verifizierten Kundendaten
+- Nutzen Sie updateAbschlag mit den verifizierten Kundendaten
 - Wiederholen Sie den genannten Betrag zur Bestätigung
 - Sprechen Sie Beträge immer in korrektem Deutsch aus (z.B. vierhundertzweiunddreißig Euro)
-- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung mit dem Betrag in Worten
-- Fragen Sie "Kann ich sonst noch etwas für Sie tun?"
-- Bei weiteren Anliegen: Direkt nach dem neuen Anliegen fragen
+- Nach erfolgreicher Änderung: Bestätigen Sie kurz und fragen Sie nach weiteren Anliegen
 - Bleiben Sie stets höflich und professionell"""}
 
                     # Get the appropriate prompt and format it with customer data if available
@@ -868,7 +863,7 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="""Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
+        default="""Guten Tag! Hier ist Mr Cerealien. Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
 - Nutzen Sie getCustomer mit der genannten Kundennummer
