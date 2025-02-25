@@ -20,6 +20,48 @@ from dotenv import load_dotenv
 from firebase_service import FirebaseService
 from database_tools import DatabaseTools, FirebaseEncoder
 
+# Define stage prompts as a global constant
+STAGE_PROMPTS = {
+    "authentication": """Du bist Gourmet, der KI-Assistent für Feudenheim Energie.
+    Du bist zurzeit in der Stage Authentication.
+    In dieser Stage kannst du Kunden allgemeine Informationen über die Feudenheim Energie AG und deren Produkte geben.
+    Wenn der Kunde eine Anfrage hat, die sein Kundenprofil involviert muss er erst verifiziert werden.
+    Wenn der Kunde die Kundennummer nennt, bitte mit getCustomer nachprüfen ob die Nummer korrekt ist.
+    Wenn der Kunde eine Frage hat wie welche Tarife es gibt, bitte mit getAllTariffs nachprüfen welche Tarife es gibt.
+
+===INTERNAL_INSTRUCTIONS===
+- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
+- Fügen Sie KEINE zusätzlichen Ziffern hinzu
+- Sprechen Sie die Kundennummer zur Bestätigung EINZELN IN DEUTSCH LANGSAM aus (z.B. "vier-zwei-drei")
+- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
+- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
+- Bei erfolgreicher Prüfung und Bestätigung direkt das Tool changeStage zu customer_service aufrufen. NICHTS SAGEN DA DER NÄCHSTE AGENT REDET.
+- Bleiben Sie stets höflich und professionell
+- JEDE KUNDENUMMER BEGINNT MIT 4300XXXXXXXXX""",
+    
+    "customer_service": """Der Kunde ist nun verifiziert Sag dass du nun Siffy der Level 2 Agent heißt und ihm helfen kannst. 
+    Frage noch einmal: Habe ich ihre Anfrage richtig verstanden?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie die verifizierten Kundendaten für personalisierte Antworten
+- Verwenden Sie AUSSCHLIESSLICH die bestätigte Kundennummer für alle Operationen
+- Bei Abschlagsfragen: Sprechen Sie den aktuellen Betrag in deutscher Wortform aus. Hundertfünfundzwanzig Euro = 125, dreiundsechzig Euro = 63
+- Bei unklarer Anfrage: Höflich erneut nachfragen
+- Bleiben Sie stets höflich und professionell""",
+    
+    "abschlag_management": """Der Kunde möchte seinen Abschlag ändern.
+    Sage ihm erst:
+    Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie updateAbschlag nur mit den verifizierten Kundendaten
+- Wiederholen Sie den genannten Betrag zur Bestätigung
+- Sprechen Sie Beträge immer in korrektem Deutsch aus Hundertfünfundzwanzig Euro = 125, dreiundsechzig Euro = 63
+- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung mit dem Betrag in Worten
+- Fragen Sie "Kann ich sonst noch etwas für Sie tun?"
+- Bei weiteren Anliegen: Direkt nach dem neuen Anliegen fragen
+- Bleiben Sie stets höflich und professionell"""}
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -237,14 +279,14 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                             "body": {
                                 "systemPrompt": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
-===INTERNAL_INSTRUCTIONS===
-- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
-- Fügen Sie KEINE zusätzlichen Ziffern hinzu
-- Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
-- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
-- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
-- Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
-- Bleiben Sie stets höflich und professionell""",
+                                    ===INTERNAL_INSTRUCTIONS===
+                                    - Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
+                                    - Fügen Sie KEINE zusätzlichen Ziffern hinzu
+                                    - Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
+                                    - Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
+                                    - Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
+                                    - Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
+                                    - Bleiben Sie stets höflich und professionell""",
                                 "customer_context": result,
                                 "toolResultText": "Kunde verifiziert"
                             }
@@ -397,41 +439,8 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                     stage = parameters.get("stage")
                     customer_data = parameters.get("customer_data", {})
                     
-                    # Define stage-specific system prompts
-                    stage_prompts = {
-                        "authentication": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
-
-===INTERNAL_INSTRUCTIONS===
-- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
-- Fügen Sie KEINE zusätzlichen Ziffern hinzu
-- Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
-- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
-- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
-- Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
-- Bleiben Sie stets höflich und professionell""",
-                        
-                        "customer_service": """Wie kann ich Ihnen heute helfen?
-
-===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie die verifizierten Kundendaten für personalisierte Antworten
-- Verwenden Sie nur die bestätigte Kundennummer für alle Operationen
-- Bei Abschlagsfragen: Sprechen Sie den aktuellen Betrag in korrektem Deutsch aus (z.B. vierhundertzweiunddreißig Euro)
-- Bei unklarer Anfrage: Höflich nachfragen
-- Bleiben Sie stets höflich und professionell""",
-                        
-                        "abschlag_management": """Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
-
-===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie updateAbschlag nur mit den verifizierten Kundendaten
-- Wiederholen Sie den genannten Betrag zur Bestätigung
-- Sprechen Sie Beträge immer in korrektem Deutsch aus (z.B. vierhundertzweiunddreißig Euro)
-- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung mit dem Betrag in Worten
-- Fragen Sie "Kann ich sonst noch etwas für Sie tun?"
-- Bei weiteren Anliegen: Direkt nach dem neuen Anliegen fragen
-- Bleiben Sie stets höflich und professionell"""}
-
                     # Get the appropriate prompt and format it with customer data if available
-                    prompt = stage_prompts.get(stage, args.system_prompt)
+                    prompt = STAGE_PROMPTS.get(stage, args.system_prompt)
                     if customer_data:
                         try:
                             name = customer_data.get("name", "dem Kunden")
@@ -569,20 +578,6 @@ async def _get_join_url() -> str:
             },
             {
                 "temporaryTool": {
-                    "modelToolName": "getUser",
-                    "description": "Get user information by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllUsers",
-                    "description": "Get all users from the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
                     "modelToolName": "getCustomer",
                     "description": "Sucht einen Kunden anhand seiner Kundennummer",
                     "client": {},
@@ -601,22 +596,8 @@ async def _get_join_url() -> str:
             },
             {
                 "temporaryTool": {
-                    "modelToolName": "getAllCustomers",
-                    "description": "Get all customers from the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "updateCustomer",
-                    "description": "Update customer information",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
                     "modelToolName": "updateAbschlag",
-                    "description": "Aktualisiert den Abschlag für einen Kunden. Beispiel: 'Ändere den Abschlag auf 88 Euro'",
+                    "description": "Aktualisiert den Abschlag für einen Kunden. Beispiel: 'Ich würde gerne meinen Abschlag auf dreiundsechzig Euro ändern'",
                     "client": {},
                     "dynamicParameters": [
                         {
@@ -624,7 +605,7 @@ async def _get_join_url() -> str:
                             "location": "PARAMETER_LOCATION_BODY",
                             "schema": {
                                 "type": "number",
-                                "description": "Der neue Abschlagsbetrag in Euro (z.B. 88 für 88 Euro)"
+                                "description": "Der neue Abschlagsbetrag in Euro (z.B. 34 für vierunddreißig Euro)"
                             },
                             "required": True
                         },
@@ -639,83 +620,6 @@ async def _get_join_url() -> str:
                         }
                     ]
                 }
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getConversation",
-                    "description": "Get conversation details by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllConversations",
-                    "description": "Get all conversations from the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getUltravoxConversation",
-                    "description": "Get Ultravox conversation details by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllUltravoxConversations",
-                    "description": "Get all Ultravox conversations from the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "saveConversation",
-                    "description": "Save a new conversation to the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getServiceStatus",
-                    "description": "Get current service status",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "updateServiceStatus",
-                    "description": "Update service status information",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getTariff",
-                    "description": "Get tariff information by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllTariffs",
-                    "description": "Get all available tariffs",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getResidentialTariff",
-                    "description": "Get the residential standard tariff",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "exploreDatabase",
-                    "description": "Get an overview of all collections and documents",
-                    "client": {},
-                },
             },
             {
                 "temporaryTool": {
@@ -868,15 +772,7 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="""Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
-
-===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie getCustomer mit der genannten Kundennummer
-- Bei erfolgreicher Verifizierung: changeStage zu customer_service mit Kundendaten
-- Bei Fehler: Höflich erneut nach Nummer fragen
-- Bei Abschlagsänderung später: changeStage zu abschlag_management
-- Bleiben Sie stets höflich und professionell
-- Verwenden Sie die Kundennummer exakt wie angegeben""",
+        default=STAGE_PROMPTS["authentication"],
         help="System prompt to use when creating the call",
     )
     parser.add_argument(
