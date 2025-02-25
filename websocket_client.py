@@ -235,12 +235,14 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                             "type": "client_tool_result",
                             "responseType": "new-stage",
                             "body": {
-                                "systemPrompt": """Wie kann ich Ihnen helfen?
+                                "systemPrompt": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie die gespeicherten Kundendaten für personalisierte Antworten
-- Bei Abschlagsänderung: changeStage zu abschlag_management
-- Bleiben Sie stets höflich und professionell""",
+- Prüfen Sie die genannte Kundennummer mit getCustomer
+- Bei erfolgreicher Prüfung: Bestätigen Sie kurz und fragen Sie direkt nach dem Anliegen
+- Bei Fehler: Höflich um erneute Nennung der Nummer bitten
+- Bleiben Sie stets höflich und professionell
+- Verwenden Sie die Kundennummer exakt wie angegeben""",
                                 "customer_context": result,
                                 "toolResultText": "Kunde verifiziert"
                             }
@@ -272,52 +274,51 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
 
             elif tool_name == "updateAbschlag":
                 try:
-                    # Get first customer and show what we're working with
-                    customers = db_tools.get_all_customers()
+                    # Get the customer data from the parameters
+                    customer_data = parameters.get("customer_data", {})
+                    if not customer_data:
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Keine Kundendaten verfügbar."
+                        })
+                        return
+                        
+                    kundennummer = customer_data.get("kundennummer", "")
+                    logging.info(f"Working with customer: {kundennummer}")
                     
-                    if customers:
-                        customer = customers[0]
-                        kundennummer = customer.get("kundennummer", "")
-                        logging.info(f"Working with customer: {kundennummer}")
+                    # Get the amount directly from the parameters
+                    new_amount = float(parameters.get("new_amount", 0))
+                    logging.info(f"Amount from parameters: {new_amount}")
+                    
+                    if new_amount <= 0:
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Der Abschlagsbetrag muss größer als 0 sein."
+                        })
+                        return
                         
-                        # Get the amount directly from the parameters
-                        new_amount = float(parameters.get("new_amount", 0))
-                        logging.info(f"Amount from parameters: {new_amount}")
-                        
-                        if new_amount <= 0:
-                            response["result"] = json.dumps({
-                                "success": False,
-                                "message": "Der Abschlagsbetrag muss größer als 0 sein."
-                            })
-                            return
-                            
-                        # Create the update data with the correct structure
-                        update_data = {
-                            "abschlag": {
-                                "betrag": new_amount,
-                                "zahlungsrhythmus": customer.get("abschlag", {}).get("zahlungsrhythmus", "monatlich"),
-                                "naechsteFaelligkeit": customer.get("abschlag", {}).get("naechsteFaelligkeit", 
-                                    datetime.datetime.now().isoformat())
-                            }
+                    # Create the update data with the correct structure
+                    update_data = {
+                        "abschlag": {
+                            "betrag": new_amount,
+                            "zahlungsrhythmus": customer_data.get("abschlag", {}).get("zahlungsrhythmus", "monatlich"),
+                            "naechsteFaelligkeit": customer_data.get("abschlag", {}).get("naechsteFaelligkeit", 
+                                datetime.datetime.now().isoformat())
                         }
-                        
-                        # Update the customer record
-                        success = db_tools.update_customer(kundennummer, update_data)
-                        
-                        if success:
-                            response["result"] = json.dumps({
-                                "success": True,
-                                "message": f"Der Abschlag wurde erfolgreich auf {new_amount} Euro aktualisiert."
-                            }, cls=FirebaseEncoder)
-                        else:
-                            response["result"] = json.dumps({
-                                "success": False,
-                                "message": "Die Aktualisierung des Abschlags ist fehlgeschlagen."
-                            })
+                    }
+                    
+                    # Update the customer record using the current customer's data
+                    success = db_tools.update_customer(kundennummer, update_data)
+                    
+                    if success:
+                        response["result"] = json.dumps({
+                            "success": True,
+                            "message": f"Der Abschlag wurde erfolgreich auf {new_amount} Euro aktualisiert."
+                        }, cls=FirebaseEncoder)
                     else:
                         response["result"] = json.dumps({
                             "success": False,
-                            "message": "Keine Kunden in der Datenbank gefunden."
+                            "message": "Die Aktualisierung des Abschlags ist fehlgeschlagen."
                         })
                 except ValueError as e:
                     logging.error(f"Error parsing amount: {str(e)}")
@@ -396,31 +397,28 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                         "authentication": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie getCustomer mit der genannten Kundennummer
-- Bei erfolgreicher Verifizierung: changeStage zu customer_service mit Kundendaten
-- Bei Fehler: Höflich erneut nach Nummer fragen
-- Bei Abschlagsänderung später: changeStage zu abschlag_management
+- Prüfen Sie die genannte Kundennummer mit getCustomer
+- Bei erfolgreicher Prüfung: Bestätigen Sie kurz und fragen Sie direkt nach dem Anliegen
+- Bei Fehler: Höflich um erneute Nennung der Nummer bitten
 - Bleiben Sie stets höflich und professionell
 - Verwenden Sie die Kundennummer exakt wie angegeben""",
                         
-                        "customer_service": """Wie kann ich Ihnen helfen?
+                        "customer_service": """Wie kann ich Ihnen heute helfen?
 
 ===INTERNAL_INSTRUCTIONS===
-- Nutzen Sie die gespeicherten Kundendaten für personalisierte Antworten
-- Bei Abschlagsänderung: changeStage zu abschlag_management
-- Wenn der Kunde das Gespräch beenden möchte: Nutzen Sie endCall
-- Bei "Auf Wiederhören" oder ähnlichen Antworten: Nutzen Sie endCall
+- Nutzen Sie die Kundendaten für personalisierte Antworten
+- Bei Abschlagsfragen: Direkt den aktuellen Betrag nennen und nach Änderungswunsch fragen
+- Bei unklarer Anfrage: Höflich nachfragen
 - Bleiben Sie stets höflich und professionell""",
                         
                         "abschlag_management": """Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
 
 ===INTERNAL_INSTRUCTIONS===
 - Nutzen Sie updateAbschlag mit dem genannten Betrag
-- Bestätigen Sie die erfolgreiche Änderung
-- Fragen Sie, ob Sie noch bei etwas anderem helfen können
-- Wenn der Kunde das Gespräch beenden möchte: Nutzen Sie endCall
-- Bei "Nein, danke" oder ähnlichen Antworten: Nutzen Sie endCall""",
-                    }
+- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung
+- Fragen Sie "Kann ich sonst noch etwas für Sie tun?"
+- Bei weiteren Anliegen: Direkt nach dem neuen Anliegen fragen
+- Bleiben Sie stets höflich und professionell"""}
 
                     # Get the appropriate prompt and format it with customer data if available
                     prompt = stage_prompts.get(stage, args.system_prompt)
@@ -460,14 +458,18 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
 
             elif tool_name == "endCall":
                 try:
-                    # Send a friendly goodbye message
-                    response["result"] = json.dumps({
-                        "success": True,
-                        "message": "Vielen Dank für Ihren Anruf. Auf Wiederhören!",
-                        "shouldEndCall": True
-                    })
-                    # Set the done event to end the call
-                    asyncio.create_task(self.stop())
+                    # Send a simple goodbye message
+                    goodbye_response = {
+                        "type": "client_tool_result",
+                        "responseType": "message",
+                        "body": {
+                            "message": "Vielen Dank für Ihren Anruf. Auf Wiederhören!"
+                        }
+                    }
+                    response["result"] = json.dumps(goodbye_response)
+                    
+                    # End the call immediately
+                    await self.stop()
                 except Exception as e:
                     logging.error(f"Error ending call: {str(e)}")
                     response["result"] = json.dumps({
@@ -613,6 +615,15 @@ async def _get_join_url() -> str:
                             "schema": {
                                 "type": "number",
                                 "description": "Der neue Abschlagsbetrag in Euro (z.B. 88 für 88 Euro)"
+                            },
+                            "required": True
+                        },
+                        {
+                            "name": "customer_data",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "object",
+                                "description": "Die Kundendaten des aktuellen Kunden"
                             },
                             "required": True
                         }
