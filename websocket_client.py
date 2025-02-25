@@ -20,6 +20,48 @@ from dotenv import load_dotenv
 from firebase_service import FirebaseService
 from database_tools import DatabaseTools, FirebaseEncoder
 
+# Define stage prompts as a global constant
+STAGE_PROMPTS = {
+    "authentication": """Du bist Gourmet, der KI-Assistent für Feudenheim Energie.
+    Du bist zurzeit in der Stage Authentication.
+    In dieser Stage kannst du Kunden allgemeine Informationen über die Feudenheim Energie AG und deren Produkte geben.
+    Wenn der Kunde eine Anfrage hat, die sein Kundenprofil involviert muss er erst verifiziert werden.
+    Wenn der Kunde die Kundennummer nennt, bitte mit getCustomer nachprüfen ob die Nummer korrekt ist.
+    Wenn der Kunde eine Frage hat wie welche Tarife es gibt, bitte mit getAllTariffs nachprüfen welche Tarife es gibt.
+
+===INTERNAL_INSTRUCTIONS===
+- Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
+- Fügen Sie KEINE zusätzlichen Ziffern hinzu
+- Sprechen Sie die Kundennummer zur Bestätigung EINZELN IN DEUTSCH LANGSAM aus (z.B. "vier-zwei-drei")
+- Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
+- Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
+- Bei erfolgreicher Prüfung und Bestätigung direkt das Tool changeStage zu customer_service aufrufen. NICHTS SAGEN DA DER NÄCHSTE AGENT REDET.
+- Bleiben Sie stets höflich und professionell
+- JEDE KUNDENUMMER BEGINNT MIT 4300XXXXXXXXX""",
+    
+    "customer_service": """Der Kunde ist nun verifiziert Sag dass du nun Siffy der Level 2 Agent heißt und ihm helfen kannst. 
+    Frage noch einmal: Habe ich ihre Anfrage richtig verstanden?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie die verifizierten Kundendaten für personalisierte Antworten
+- Verwenden Sie AUSSCHLIESSLICH die bestätigte Kundennummer für alle Operationen
+- Bei Abschlagsfragen: Sprechen Sie den aktuellen Betrag in deutscher Wortform aus. Hundertfünfundzwanzig Euro = 125, dreiundsechzig Euro = 63
+- Bei unklarer Anfrage: Höflich erneut nachfragen
+- Bleiben Sie stets höflich und professionell""",
+    
+    "abschlag_management": """Der Kunde möchte seinen Abschlag ändern.
+    Sage ihm erst:
+    Ihr aktueller Abschlag beträgt {current_amount} Euro. Welchen neuen Betrag möchten Sie festlegen?
+
+===INTERNAL_INSTRUCTIONS===
+- Nutzen Sie updateAbschlag nur mit den verifizierten Kundendaten
+- Wiederholen Sie den genannten Betrag zur Bestätigung
+- Sprechen Sie Beträge immer in korrektem Deutsch aus Hundertfünfundzwanzig Euro = 125, dreiundsechzig Euro = 63
+- Nach erfolgreicher Änderung: Bestätigen Sie die Änderung mit dem Betrag in Worten
+- Fragen Sie "Kann ich sonst noch etwas für Sie tun?"
+- Bei weiteren Anliegen: Direkt nach dem neuen Anliegen fragen
+- Bleiben Sie stets höflich und professionell"""}
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -436,8 +478,44 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
 
             # Customer operations
             elif tool_name == "getCustomer":
-                result = db_tools.get_customer(parameters["customerId"])
-                response["result"] = json.dumps(result, cls=FirebaseEncoder) if result is not None else None
+                try:
+                    kundennummer = parameters.get("kundennummer")
+                    logging.info(f"Looking up customer with Kundennummer: {kundennummer}")
+                    result = db_tools.get_customer(kundennummer)
+                    if result:
+                        logging.info("Customer found")
+                        # Prepare stage change with customer data
+                        stage_response = {
+                            "type": "client_tool_result",
+                            "responseType": "new-stage",
+                            "body": {
+                                "systemPrompt": """Guten Tag! Könnten Sie mir bitte Ihre Kundennummer mitteilen?
+
+                                    ===INTERNAL_INSTRUCTIONS===
+                                    - Prüfen Sie die genannte Kundennummer EXAKT wie vom Kunden angegeben mit getCustomer
+                                    - Fügen Sie KEINE zusätzlichen Ziffern hinzu
+                                    - Sprechen Sie die Kundennummer zur Bestätigung einzeln aus (z.B. "vier-zwei-drei")
+                                    - Warten Sie auf Bestätigung vom Kunden, dass die Nummer korrekt ist
+                                    - Bei Fehler oder Verneinung: Höflich um erneute Nennung der kompletten Nummer bitten
+                                    - Bei erfolgreicher Prüfung und Bestätigung: Erst dann changeStage zu customer_service
+                                    - Bleiben Sie stets höflich und professionell""",
+                                "customer_context": result,
+                                "toolResultText": "Kunde verifiziert"
+                            }
+                        }
+                        response["result"] = json.dumps(stage_response, cls=FirebaseEncoder)
+                    else:
+                        logging.info("Customer not found")
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Entschuldigung, ich konnte diese Kundennummer leider nicht finden. Könnten Sie sie bitte noch einmal überprüfen?"
+                        })
+                except Exception as e:
+                    logging.error(f"Error in getCustomer: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Entschuldigung, bei der Kundensuche ist ein Fehler aufgetreten. Können Sie die Nummer bitte noch einmal nennen?"
+                    })
                 
             elif tool_name == "getAllCustomers":
                 result = db_tools.get_all_customers()
@@ -449,6 +527,70 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                     json.loads(parameters["data"])
                 )
                 response["result"] = json.dumps({"success": success}, cls=FirebaseEncoder)
+
+            elif tool_name == "updateAbschlag":
+                try:
+                    # Get the customer data from the parameters
+                    customer_data = parameters.get("customer_data", {})
+                    if not customer_data:
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Keine Kundendaten verfügbar."
+                        })
+                        return
+                        
+                    kundennummer = customer_data.get("kundennummer", "")
+                    logging.info(f"Working with customer: {kundennummer}")
+                    
+                    # Get the amount directly from the parameters
+                    new_amount = float(parameters.get("new_amount", 0))
+                    logging.info(f"Amount from parameters: {new_amount}")
+                    
+                    # Convert to integer if it's a whole number
+                    new_amount = int(new_amount) if new_amount.is_integer() else new_amount
+                    
+                    if new_amount <= 0:
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Der Abschlagsbetrag muss größer als 0 sein."
+                        })
+                        return
+                        
+                    # Create the update data with the correct structure
+                    update_data = {
+                        "abschlag": {
+                            "betrag": new_amount,
+                            "zahlungsrhythmus": customer_data.get("abschlag", {}).get("zahlungsrhythmus", "monatlich"),
+                            "naechsteFaelligkeit": customer_data.get("abschlag", {}).get("naechsteFaelligkeit", 
+                                datetime.datetime.now().isoformat())
+                        }
+                    }
+                    
+                    # Update the customer record using the current customer's data
+                    success = db_tools.update_customer(kundennummer, update_data)
+                    
+                    if success:
+                        response["result"] = json.dumps({
+                            "success": True,
+                            "message": f"Der Abschlag wurde erfolgreich auf {new_amount} Euro aktualisiert."
+                        }, cls=FirebaseEncoder)
+                    else:
+                        response["result"] = json.dumps({
+                            "success": False,
+                            "message": "Die Aktualisierung des Abschlags ist fehlgeschlagen."
+                        })
+                except ValueError as e:
+                    logging.error(f"Error parsing amount: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Der angegebene Betrag konnte nicht als Zahl erkannt werden."
+                    })
+                except Exception as e:
+                    logging.error(f"Error in updateAbschlag: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Ein Fehler ist aufgetreten: " + str(e)
+                    })
 
             # Conversation operations
             elif tool_name == "getConversation":
@@ -504,6 +646,68 @@ class WebsocketVoiceSession(pyee.asyncio.AsyncIOEventEmitter):
                 result = db_tools.explore_database()
                 response["result"] = json.dumps(result, cls=FirebaseEncoder)
                 
+            elif tool_name == "changeStage":
+                try:
+                    stage = parameters.get("stage")
+                    customer_data = parameters.get("customer_data", {})
+                    
+                    # Get the appropriate prompt and format it with customer data if available
+                    prompt = STAGE_PROMPTS.get(stage, args.system_prompt)
+                    if customer_data:
+                        try:
+                            name = customer_data.get("name", "dem Kunden")
+                            current_amount = customer_data.get("abschlag", {}).get("betrag", "0")
+                            prompt = prompt.format(name=name, current_amount=current_amount)
+                        except KeyError:
+                            # If formatting fails, use the prompt as is
+                            pass
+                    
+                    # Split the prompt into customer-facing and internal parts
+                    parts = prompt.split("===INTERNAL_INSTRUCTIONS===")
+                    customer_prompt = parts[0].strip()
+                    internal_instructions = parts[1].strip() if len(parts) > 1 else ""
+                    
+                    # Prepare the stage change response with separated prompts
+                    stage_response = {
+                        "type": "client_tool_result",
+                        "responseType": "new-stage",
+                        "body": {
+                            "systemPrompt": f"{customer_prompt}\n\n{internal_instructions}",
+                            "toolResultText": "OK"
+                        }
+                    }
+                    
+                    if customer_data:
+                        stage_response["body"]["customer_context"] = customer_data
+                    
+                    response["result"] = json.dumps(stage_response, cls=FirebaseEncoder)
+                    
+                except Exception as e:
+                    logging.error(f"Error in changeStage: {str(e)}")
+                    response["errorType"] = "StageChangeError"
+                    response["errorMessage"] = f"Failed to change stage: {str(e)}"
+
+            elif tool_name == "endCall":
+                try:
+                    # Send a simple goodbye message
+                    goodbye_response = {
+                        "type": "client_tool_result",
+                        "responseType": "message",
+                        "body": {
+                            "message": "Vielen Dank für Ihren Anruf. Auf Wiederhören!"
+                        }
+                    }
+                    response["result"] = json.dumps(goodbye_response)
+                    
+                    # End the call immediately
+                    await self.stop()
+                except Exception as e:
+                    logging.error(f"Error ending call: {str(e)}")
+                    response["result"] = json.dumps({
+                        "success": False,
+                        "message": "Ein Fehler ist aufgetreten beim Beenden des Gesprächs."
+                    })
+
             else:
                 response["errorType"] = "undefined"
                 response["errorMessage"] = f"Unknown tool: {tool_name}"
@@ -578,115 +782,83 @@ async def _get_join_url() -> str:
         selected_tools = [
             {
                 "temporaryTool": {
-                    "modelToolName": "getUser",
-                    "description": "Get user information by ID",
+                    "modelToolName": "changeStage",
+                    "description": "Changes the conversation stage. Used for transitioning between different phases of the conversation.",
                     "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllUsers",
-                    "description": "Get all users from the database",
-                    "client": {},
-                },
+                    "dynamicParameters": [
+                        {
+                            "name": "stage",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "string",
+                                "description": "The stage to transition to (authentication, customer_service, abschlag_management)",
+                                "enum": ["authentication", "customer_service", "abschlag_management"]
+                            },
+                            "required": True
+                        },
+                        {
+                            "name": "customer_data",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "object",
+                                "description": "Customer data to carry forward to next stage"
+                            },
+                            "required": False
+                        }
+                    ]
+                }
             },
             {
                 "temporaryTool": {
                     "modelToolName": "getCustomer",
-                    "description": "Get customer information by ID",
+                    "description": "Sucht einen Kunden anhand seiner Kundennummer",
                     "client": {},
+                    "dynamicParameters": [
+                        {
+                            "name": "kundennummer",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "string",
+                                "description": "Die Kundennummer des Kunden"
+                            },
+                            "required": True
+                        }
+                    ]
                 },
             },
             {
                 "temporaryTool": {
-                    "modelToolName": "getAllCustomers",
-                    "description": "Get all customers from the database",
+                    "modelToolName": "updateAbschlag",
+                    "description": "Aktualisiert den Abschlag für einen Kunden. Beispiel: 'Ich würde gerne meinen Abschlag auf dreiundsechzig Euro ändern'",
                     "client": {},
-                },
+                    "dynamicParameters": [
+                        {
+                            "name": "new_amount",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "number",
+                                "description": "Der neue Abschlagsbetrag in Euro (z.B. 34 für vierunddreißig Euro)"
+                            },
+                            "required": True
+                        },
+                        {
+                            "name": "customer_data",
+                            "location": "PARAMETER_LOCATION_BODY",
+                            "schema": {
+                                "type": "object",
+                                "description": "Die Kundendaten des aktuellen Kunden"
+                            },
+                            "required": True
+                        }
+                    ]
+                }
             },
             {
                 "temporaryTool": {
-                    "modelToolName": "updateCustomer",
-                    "description": "Update customer information",
+                    "modelToolName": "endCall",
+                    "description": "Beendet das Gespräch nach erfolgreicher Bearbeitung des Anliegens",
                     "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getConversation",
-                    "description": "Get conversation details by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllConversations",
-                    "description": "Get all conversations from the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getUltravoxConversation",
-                    "description": "Get Ultravox conversation details by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllUltravoxConversations",
-                    "description": "Get all Ultravox conversations from the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "saveConversation",
-                    "description": "Save a new conversation to the database",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getServiceStatus",
-                    "description": "Get current service status",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "updateServiceStatus",
-                    "description": "Update service status information",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getTariff",
-                    "description": "Get tariff information by ID",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getAllTariffs",
-                    "description": "Get all available tariffs",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "getResidentialTariff",
-                    "description": "Get the residential standard tariff",
-                    "client": {},
-                },
-            },
-            {
-                "temporaryTool": {
-                    "modelToolName": "exploreDatabase",
-                    "description": "Get an overview of all collections and documents",
-                    "client": {},
-                },
+                }
             },
         ]
         if args.secret_menu:
@@ -740,6 +912,35 @@ def _add_query_param(url: str, key: str, value: str) -> str:
     query.update({key: value})
     url_parts[4] = urllib.parse.urlencode(query)
     return urllib.parse.urlunparse(url_parts)
+
+
+def _convert_to_german_number_words(number: int) -> str:
+    """Convert a number to German words."""
+    units = ["", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun"]
+    teens = ["zehn", "elf", "zwölf", "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn"]
+    tens = ["", "", "zwanzig", "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig", "neunzig"]
+    
+    if number < 0:
+        return f"minus {_convert_to_german_number_words(abs(number))}"
+    if number == 0:
+        return "null"
+    if number < 10:
+        return units[number]
+    if number < 20:
+        return teens[number - 10]
+    if number < 100:
+        unit = number % 10
+        ten = number // 10
+        if unit == 0:
+            return tens[ten]
+        return f"{units[unit]}und{tens[ten]}"
+    if number < 1000:
+        hundreds = number // 100
+        rest = number % 100
+        if rest == 0:
+            return f"{units[hundreds]}hundert"
+        return f"{units[hundreds]}hundert{_convert_to_german_number_words(rest)}"
+    return str(number)  # For larger numbers, return as is
 
 
 async def main():
@@ -842,40 +1043,8 @@ if __name__ == "__main__":
         "--system-prompt",
         "-s",
         type=str,
-        default="""Sie sind ein KI-Assistent für ein Energieversorgungsunternehmen und sprechen ausschließlich Deutsch. Sie haben Zugriff auf unsere Firebase-Datenbank und nutzen diese für genaue Informationen.
+        default=STAGE_PROMPTS["authentication"],
 
-Wichtige Sprachregeln:
-1. Sprechen Sie ALLE Zahlen einzeln aus (z.B. Kundennummer 12345 als "eins-zwei-drei-vier-fünf")
-2. Sprechen Sie ausschließlich Deutsch
-3. Verwenden Sie höfliche Anrede (Sie-Form)
-4. Nutzen Sie deutsche Fachbegriffe für den Energiesektor
-
-Verfügbare Datenbank-Funktionen:
-1. Kundeninformationen:
-   - getCustomer(customer_id): Kundendetails abrufen
-   - getAllCustomers(): Alle Kundendatensätze anzeigen
-
-2. Servicestatus:
-   - getServiceStatus(): Aktuellen Systemstatus prüfen
-   - updateServiceStatus(status_id, data): Servicestatus aktualisieren
-
-3. Tarife:
-   - getTariff(tariff_id): Tarifdetails abrufen
-   - getAllTariffs(): Alle verfügbaren Tarife anzeigen
-   - getResidentialTariff(): Standard-Haushaltstarif abrufen
-
-4. Gesprächsverlauf:
-   - getConversation(conversation_id): Spezifisches Gespräch abrufen
-   - getAllConversations(): Alle Gespräche anzeigen
-   - saveConversation(data): Neues Gespräch speichern
-
-Beim Verwenden der Funktionen:
-1. Prüfen Sie immer, ob die Information in der Datenbank existiert
-2. Falls Daten nicht gefunden werden, kommunizieren Sie dies klar
-3. Verwenden Sie Fehlerbehandlung beim Datenbankzugriff
-4. Behalten Sie den Gesprächskontext für Folgefragen im Auge
-
-Aktuelle Uhrzeit: ${datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""",
         help="System prompt to use when creating the call",
     )
     parser.add_argument(

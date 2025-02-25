@@ -37,6 +37,21 @@ class FirebaseService:
     def update_document(self, collection: str, doc_id: str, data: Dict[str, Any]) -> bool:
         """Update a document in Firestore."""
         try:
+            # Clean up the document path (remove any trailing slashes)
+            doc_id = doc_id.strip().rstrip('/')
+            collection = collection.strip().rstrip('/')
+            
+            # Replace ${SERVER_TIMESTAMP} with actual server timestamp
+            def replace_server_timestamp(d):
+                if isinstance(d, dict):
+                    return {k: firestore.SERVER_TIMESTAMP if v == "${SERVER_TIMESTAMP}" 
+                          else replace_server_timestamp(v) for k, v in d.items()}
+                elif isinstance(d, list):
+                    return [replace_server_timestamp(v) for v in d]
+                return d
+            
+            data = replace_server_timestamp(data)
+            
             doc_ref = self.db.collection(collection).document(doc_id)
             doc_ref.update(data)
             return True
